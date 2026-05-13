@@ -1,6 +1,8 @@
 # pilab-esp32-p4-plc
 PiLab P4 is an experimental browser-first PLC/HMI platform running directly on the ESP32-P4.
 
+> 📖 New here? Start with the [PiLab Philosophy](docs/PiLab_Philosophy.md)
+
 # Web App
 ![PiLab PLC Command Center](docs/images/command-center.png)
 
