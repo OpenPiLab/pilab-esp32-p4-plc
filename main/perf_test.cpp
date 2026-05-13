@@ -14,6 +14,7 @@
 #include "esp_check.h"
 #include "script_engine.hpp"
 #include "plc_io.hpp"
+#include "plc_tags.hpp"
 
 static const char* TAG = "PERF_TEST";
 
@@ -22,6 +23,7 @@ static constexpr uint32_t IO_TICK_PERIOD_US = 1000;       // 1 ms hardware tick
 static constexpr uint32_t SCRIPT_SCAN_DIVIDER = 5;           // run AngelScript every 5th tick
 static constexpr uint32_t SCRIPT_SCAN_PERIOD_US = IO_TICK_PERIOD_US * SCRIPT_SCAN_DIVIDER;
 static constexpr uint32_t REPORT_PERIOD_MS = 5000;       // 5 seconds
+static constexpr uint32_t DEFAULT_MAX_DELTA_US = 50000;   // Clamp actual script dt to 50 ms by default
 
 // Artificial CPU load settings
 static constexpr bool ENABLE_BACKGROUND_LOAD_TASK = true;
@@ -200,6 +202,57 @@ static ScriptPerfStats g_script_stats;
 static portMUX_TYPE g_stats_lock = portMUX_INITIALIZER_UNLOCKED;
 static portMUX_TYPE g_mode_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool g_plc_runtime_enabled = true;
+static PlcRuntimePolicy g_runtime_policy = {
+    PLC_OVERRUN_FAULT_AFTER_LIMIT,
+    PLC_TIME_ACTUAL_CLAMPED,
+    SCRIPT_SCAN_PERIOD_US,
+    DEFAULT_MAX_DELTA_US,
+    20,
+    100
+};
+static bool g_scan_fault_active = false;
+static uint32_t g_consecutive_overruns = 0;
+static uint64_t g_total_coalesced_scans = 0;
+static uint64_t g_total_overrun_scans = 0;
+static uint32_t g_last_script_actual_period_us = SCRIPT_SCAN_PERIOD_US;
+static uint32_t g_last_script_delta_us = SCRIPT_SCAN_PERIOD_US;
+static uint32_t g_last_script_execution_us = 0;
+static float g_last_script_load_percent = 0.0f;
+
+void perf_test_get_runtime_policy(PlcRuntimePolicy *out)
+{
+    if (!out) return;
+    taskENTER_CRITICAL(&g_mode_lock);
+    *out = g_runtime_policy;
+    taskEXIT_CRITICAL(&g_mode_lock);
+}
+
+void perf_test_set_runtime_policy(const PlcRuntimePolicy *policy)
+{
+    if (!policy) return;
+
+    PlcRuntimePolicy next = *policy;
+    if (next.script_budget_us < 500) next.script_budget_us = SCRIPT_SCAN_PERIOD_US;
+    if (next.max_delta_us < next.script_budget_us) next.max_delta_us = next.script_budget_us;
+    if (next.fault_after_consecutive_overruns == 0) next.fault_after_consecutive_overruns = 1;
+
+    taskENTER_CRITICAL(&g_mode_lock);
+    g_runtime_policy = next;
+    g_scan_fault_active = false;
+    g_consecutive_overruns = 0;
+    taskEXIT_CRITICAL(&g_mode_lock);
+
+    plc_tags_set_internal_bool("PLC_ScanFaultActive", false);
+
+    ESP_LOGI(TAG,
+             "PLC runtime policy applied: overrunPolicy=%d timeMode=%d budget=%lu maxDelta=%lu faultAfterOverruns=%lu faultAfterCoalesced=%lu",
+             (int)next.overrun_policy,
+             (int)next.time_mode,
+             (unsigned long)next.script_budget_us,
+             (unsigned long)next.max_delta_us,
+             (unsigned long)next.fault_after_consecutive_overruns,
+             (unsigned long)next.fault_after_coalesced_scans);
+}
 
 bool perf_test_is_plc_running(void)
 {
@@ -338,27 +391,123 @@ static void script_scan_task(void* arg)
 
     ESP_LOGI(TAG, "AngelScript scan task started: period=%u us, triggered by 1 ms PLC task", SCRIPT_SCAN_PERIOD_US);
 
+    int64_t last_script_start_us = 0;
+
     while (true)
     {
         const uint32_t notify_count = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
+        const int64_t start_us = esp_timer_get_time();
+        uint32_t actual_period_us = SCRIPT_SCAN_PERIOD_US;
+        if (last_script_start_us > 0 && start_us > last_script_start_us) {
+            actual_period_us = (uint32_t)(start_us - last_script_start_us);
+        }
+        last_script_start_us = start_us;
+
+        PlcRuntimePolicy policy;
+        bool fault_active;
+        taskENTER_CRITICAL(&g_mode_lock);
+        policy = g_runtime_policy;
+        fault_active = g_scan_fault_active;
+        taskEXIT_CRITICAL(&g_mode_lock);
+
+        uint32_t delta_us = SCRIPT_SCAN_PERIOD_US;
+        if (policy.time_mode == PLC_TIME_ACTUAL) {
+            delta_us = actual_period_us;
+        } else if (policy.time_mode == PLC_TIME_ACTUAL_CLAMPED) {
+            delta_us = actual_period_us;
+            if (delta_us > policy.max_delta_us) delta_us = policy.max_delta_us;
+        }
+
+        script_engine_set_scan_timing(delta_us, actual_period_us, policy.script_budget_us);
+
         // Measure the entire soft PLC script cycle, not just ctx->Execute().
         // This includes input sync, pending script activation, AngelScript
         // execution, output copyback, and retired program cleanup.
-        const int64_t start_us = esp_timer_get_time();
-        const bool ran = perf_test_is_plc_running() ? script_engine_run_scan() : false;
-        const int64_t total_us = esp_timer_get_time() - start_us;
+        const bool can_run = perf_test_is_plc_running() && !fault_active;
+        const bool ran = can_run ? script_engine_run_scan() : false;
+        const int64_t total_us_i64 = esp_timer_get_time() - start_us;
+        const uint32_t total_us = total_us_i64 > 0 ? (uint32_t)total_us_i64 : 0;
+
+        uint32_t drained = 0;
+        if (total_us > policy.script_budget_us || notify_count > 1) {
+            drained = ulTaskNotifyTake(pdTRUE, 0);
+        }
+        const uint32_t coalesced = (notify_count > 1 ? (notify_count - 1) : 0) + drained;
+        const bool overrun = total_us > policy.script_budget_us;
+        const float load = policy.script_budget_us ? ((float)total_us * 100.0f / (float)policy.script_budget_us) : 0.0f;
+
+        bool stop_now = false;
+        bool new_fault = false;
+
+        taskENTER_CRITICAL(&g_mode_lock);
+        g_last_script_actual_period_us = actual_period_us;
+        g_last_script_delta_us = delta_us;
+        g_last_script_execution_us = total_us;
+        g_last_script_load_percent = load;
+        if (coalesced) g_total_coalesced_scans += coalesced;
+        if (overrun) {
+            g_total_overrun_scans++;
+            g_consecutive_overruns++;
+        } else {
+            g_consecutive_overruns = 0;
+        }
+
+        switch (policy.overrun_policy) {
+            case PLC_OVERRUN_STOP_IMMEDIATELY:
+                if (overrun || coalesced) { g_scan_fault_active = true; stop_now = true; new_fault = true; }
+                break;
+            case PLC_OVERRUN_FAULT_AFTER_LIMIT:
+                if (g_consecutive_overruns >= policy.fault_after_consecutive_overruns ||
+                    (policy.fault_after_coalesced_scans > 0 && coalesced >= policy.fault_after_coalesced_scans)) {
+                    g_scan_fault_active = true;
+                    stop_now = true;
+                    new_fault = true;
+                }
+                break;
+            case PLC_OVERRUN_WARN_CONTINUE:
+            case PLC_OVERRUN_COALESCE_CONTINUE:
+            case PLC_OVERRUN_EDGE_TASK:
+            default:
+                break;
+        }
+        fault_active = g_scan_fault_active;
+        taskEXIT_CRITICAL(&g_mode_lock);
+
+        if (stop_now) {
+            perf_test_set_plc_running(false);
+            ESP_LOGE(TAG, "PLC stopped by script overrun policy: total_us=%lu budget_us=%lu coalesced=%lu",
+                     (unsigned long)total_us,
+                     (unsigned long)policy.script_budget_us,
+                     (unsigned long)coalesced);
+        } else if (new_fault) {
+            ESP_LOGE(TAG, "PLC scan fault set by overrun policy");
+        }
+
+        plc_tags_set_internal_int("PLC_ScanCoalescedCount", (int32_t)(g_total_coalesced_scans > INT32_MAX ? INT32_MAX : g_total_coalesced_scans));
+        plc_tags_set_internal_int("PLC_ScanOverrunCount", (int32_t)(g_total_overrun_scans > INT32_MAX ? INT32_MAX : g_total_overrun_scans));
+        plc_tags_set_internal_bool("PLC_ScanOverrunActive", overrun || coalesced > 0);
+        plc_tags_set_internal_bool("PLC_ScanFaultActive", fault_active);
+        plc_tags_set_internal_int("PLC_ScanActualPeriodUs", (int32_t)actual_period_us);
+        plc_tags_set_internal_int("PLC_ScanExecutionTimeUs", (int32_t)total_us);
+        plc_tags_set_internal_float("PLC_ScanLoadPercent", load);
+        plc_tags_set_internal_int("PLC_DeltaTimeUs", (int32_t)delta_us);
+        plc_tags_set_internal_float("PLC_DeltaTimeMs", (float)delta_us / 1000.0f);
 
         taskENTER_CRITICAL(&g_stats_lock);
 
-        if (notify_count > 1)
+        if (coalesced > 0)
         {
-            g_script_stats.missed_notifications += notify_count - 1;
+            g_script_stats.missed_notifications += coalesced;
         }
 
         g_script_stats.add_sample(total_us, ran);
 
         taskEXIT_CRITICAL(&g_stats_lock);
+
+        // Always yield after a script scan. When overloaded, this prevents the
+        // 5 ms script task from monopolizing CPU0 and starving IDLE0 / watchdog.
+        taskYIELD();
     }
 }
 
@@ -438,6 +587,12 @@ static void report_task(void* arg)
         ESP_LOGI(TAG, "Script >10 ms:  %llu", static_cast<unsigned long long>(script_snapshot.over_10000us));
         ESP_LOGI(TAG, "Script missed/coalesced notifications: %llu",
                  static_cast<unsigned long long>(script_snapshot.missed_notifications));
+        ESP_LOGI(TAG, "Script runtime: actual_period=%lu us delta=%lu us exec=%lu us load=%.1f%% fault=%d",
+                 (unsigned long)g_last_script_actual_period_us,
+                 (unsigned long)g_last_script_delta_us,
+                 (unsigned long)g_last_script_execution_us,
+                 (double)g_last_script_load_percent,
+                 g_scan_fault_active ? 1 : 0);
 
         ESP_LOGI(TAG, "---------------- Memory / Stack --------------------");
         ESP_LOGI(TAG, "Heap free 8-bit: %u bytes", static_cast<unsigned>(free_8bit));

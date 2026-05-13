@@ -6,6 +6,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <strings.h>
 
 #include <errno.h>
 #include <stdio.h>
@@ -28,8 +29,98 @@
 
 #include "plc_io.hpp"
 #include "plc_tags.hpp"
+#include "perf_test.hpp"
 
 static const char* TAG = "AS_ENGINE";
+
+static const char* AS_SCRIPT_TAG = "AS_SCRIPT";
+
+enum PiLabScriptLogLevel : int {
+    PILAB_SCRIPT_LOG_NONE = 0,
+    PILAB_SCRIPT_LOG_ERROR = 1,
+    PILAB_SCRIPT_LOG_WARN = 2,
+    PILAB_SCRIPT_LOG_INFO = 3,
+    PILAB_SCRIPT_LOG_DEBUG = 4,
+    PILAB_SCRIPT_LOG_VERBOSE = 5,
+};
+
+static std::atomic<int> g_pilab_script_log_level{PILAB_SCRIPT_LOG_INFO};
+static std::atomic<int> g_script_update_mode{SCRIPT_UPDATE_PAUSE_DURING_COMPILE};
+
+static uint32_t g_script_delta_time_us = 5000;
+static float g_script_delta_time_ms = 5.0f;
+static float g_script_delta_time_s = 0.005f;
+static uint32_t g_script_actual_period_us = 5000;
+static uint32_t g_script_budget_us = 5000;
+
+extern "C" void script_engine_set_scan_timing(uint32_t delta_us, uint32_t actual_period_us, uint32_t budget_us)
+{
+    if (delta_us == 0) delta_us = 5000;
+    g_script_delta_time_us = delta_us;
+    g_script_delta_time_ms = (float)delta_us / 1000.0f;
+    g_script_delta_time_s = (float)delta_us / 1000000.0f;
+    g_script_actual_period_us = actual_period_us;
+    g_script_budget_us = budget_us ? budget_us : 5000;
+}
+
+
+static int parse_pilab_script_log_level(const char* level)
+{
+    if (!level || !level[0]) return PILAB_SCRIPT_LOG_INFO;
+    if (strcasecmp(level, "off") == 0 || strcasecmp(level, "none") == 0) return PILAB_SCRIPT_LOG_NONE;
+    if (strcasecmp(level, "error") == 0 || strcasecmp(level, "err") == 0) return PILAB_SCRIPT_LOG_ERROR;
+    if (strcasecmp(level, "warn") == 0 || strcasecmp(level, "warning") == 0) return PILAB_SCRIPT_LOG_WARN;
+    if (strcasecmp(level, "info") == 0) return PILAB_SCRIPT_LOG_INFO;
+    if (strcasecmp(level, "debug") == 0) return PILAB_SCRIPT_LOG_DEBUG;
+    if (strcasecmp(level, "verbose") == 0 || strcasecmp(level, "trace") == 0) return PILAB_SCRIPT_LOG_VERBOSE;
+    return PILAB_SCRIPT_LOG_INFO;
+}
+
+static bool pilab_script_log_enabled(int required_level)
+{
+    return g_pilab_script_log_level.load() >= required_level;
+}
+
+
+extern "C" void script_engine_set_update_mode(const char* mode)
+{
+    int next = SCRIPT_UPDATE_PAUSE_DURING_COMPILE;
+    if (mode) {
+        if (strcasecmp(mode, "stopBeforeCompile") == 0 || strcasecmp(mode, "stop") == 0) next = SCRIPT_UPDATE_STOP_BEFORE_COMPILE;
+        else if (strcasecmp(mode, "onlineHotSwap") == 0 || strcasecmp(mode, "online") == 0 || strcasecmp(mode, "hotSwap") == 0) next = SCRIPT_UPDATE_ONLINE_HOT_SWAP;
+        else if (strcasecmp(mode, "pauseDuringCompile") == 0 || strcasecmp(mode, "pause") == 0) next = SCRIPT_UPDATE_PAUSE_DURING_COMPILE;
+    }
+    g_script_update_mode.store(next);
+    ESP_LOGI(TAG, "Script update mode set to %s", script_engine_get_update_mode());
+}
+
+extern "C" const char* script_engine_get_update_mode(void)
+{
+    switch (g_script_update_mode.load()) {
+        case SCRIPT_UPDATE_STOP_BEFORE_COMPILE: return "stopBeforeCompile";
+        case SCRIPT_UPDATE_ONLINE_HOT_SWAP: return "onlineHotSwap";
+        case SCRIPT_UPDATE_PAUSE_DURING_COMPILE:
+        default: return "pauseDuringCompile";
+    }
+}
+
+extern "C" void script_engine_set_runtime_log_level(const char* level)
+{
+    g_pilab_script_log_level.store(parse_pilab_script_log_level(level));
+}
+
+extern "C" const char* script_engine_get_runtime_log_level(void)
+{
+    switch (g_pilab_script_log_level.load()) {
+        case PILAB_SCRIPT_LOG_NONE: return "none";
+        case PILAB_SCRIPT_LOG_ERROR: return "error";
+        case PILAB_SCRIPT_LOG_WARN: return "warn";
+        case PILAB_SCRIPT_LOG_INFO: return "info";
+        case PILAB_SCRIPT_LOG_DEBUG: return "debug";
+        case PILAB_SCRIPT_LOG_VERBOSE: return "verbose";
+        default: return "info";
+    }
+}
 
 // -----------------------------------------------------------------------------
 // AngelScript allocator
@@ -109,7 +200,9 @@ static void copy_outputs_from_script_globals()
 static void AS_LogInt_Generic(asIScriptGeneric* gen)
 {
     uint32_t value = gen->GetArgDWord(0);
-    ESP_LOGI("AS_SCRIPT", "logInt: %lu", (unsigned long)value);
+    if (pilab_script_log_enabled(PILAB_SCRIPT_LOG_INFO)) {
+        ESP_LOGI(AS_SCRIPT_TAG, "logInt: %lu", (unsigned long)value);
+    }
 }
 
 static void AS_GetDI_Generic(asIScriptGeneric* gen)
@@ -269,7 +362,14 @@ static void ASMessageCallback(const asSMessageInfo* msg, void* param)
              type,
              msg->message ? msg->message : "");
     append_error(*errors, line);
-    ESP_LOGW(TAG, "%s", line);
+
+    if (msg->type == asMSGTYPE_ERROR) {
+        if (pilab_script_log_enabled(PILAB_SCRIPT_LOG_ERROR)) ESP_LOGE(TAG, "%s", line);
+    } else if (msg->type == asMSGTYPE_WARNING) {
+        if (pilab_script_log_enabled(PILAB_SCRIPT_LOG_WARN)) ESP_LOGW(TAG, "%s", line);
+    } else {
+        if (pilab_script_log_enabled(PILAB_SCRIPT_LOG_INFO)) ESP_LOGI(TAG, "%s", line);
+    }
 }
 
 static bool register_bool_global(asIScriptEngine* engine, const char* name, bool* ptr, std::string& errors)
@@ -279,6 +379,34 @@ static bool register_bool_global(asIScriptEngine* engine, const char* name, bool
     int r = engine->RegisterGlobalProperty(decl, ptr);
     if (r < 0) {
         char msg[96];
+        snprintf(msg, sizeof(msg), "RegisterGlobalProperty failed: %s\n", decl);
+        append_error(errors, msg);
+        return false;
+    }
+    return true;
+}
+
+static bool register_uint_global(asIScriptEngine* engine, const char* name, uint32_t* ptr, std::string& errors)
+{
+    char decl[48];
+    snprintf(decl, sizeof(decl), "const uint %s", name);
+    int r = engine->RegisterGlobalProperty(decl, ptr);
+    if (r < 0) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "RegisterGlobalProperty failed: %s\n", decl);
+        append_error(errors, msg);
+        return false;
+    }
+    return true;
+}
+
+static bool register_const_float_global(asIScriptEngine* engine, const char* name, float* ptr, std::string& errors)
+{
+    char decl[48];
+    snprintf(decl, sizeof(decl), "const float %s", name);
+    int r = engine->RegisterGlobalProperty(decl, ptr);
+    if (r < 0) {
+        char msg[128];
         snprintf(msg, sizeof(msg), "RegisterGlobalProperty failed: %s\n", decl);
         append_error(errors, msg);
         return false;
@@ -363,6 +491,12 @@ public:
             char name[8]; snprintf(name, sizeof(name), "AO%lu", (unsigned long)i);
             if (!register_float_global(engine, name, &g_script_io.AO[i], errors)) return false;
         }
+
+        if (!register_uint_global(engine, "PLC_DeltaTimeUs", &g_script_delta_time_us, errors)) return false;
+        if (!register_const_float_global(engine, "PLC_DeltaTimeMs", &g_script_delta_time_ms, errors)) return false;
+        if (!register_const_float_global(engine, "PLC_DeltaTimeSeconds", &g_script_delta_time_s, errors)) return false;
+        if (!register_uint_global(engine, "PLC_ScanActualPeriodUs", &g_script_actual_period_us, errors)) return false;
+        if (!register_uint_global(engine, "PLC_ScanBudgetUs", &g_script_budget_us, errors)) return false;
 
         char tag_err[256] = {};
         if (!plc_tags_register_angelscript_globals(engine, tag_err, sizeof(tag_err))) {
@@ -657,11 +791,20 @@ static void script_compile_task(void*)
             vTaskDelay(SCRIPT_COMPILE_DEFER_TICKS);
 
             const int64_t pause_start = esp_timer_get_time();
-            g_pause_start_us.store(pause_start);
-            g_pause_script_for_compile.store(true);
-            g_total_pause_windows.fetch_add(1);
+            const int update_mode = g_script_update_mode.load();
+            const bool stop_before_compile = (update_mode == SCRIPT_UPDATE_STOP_BEFORE_COMPILE);
+            const bool pause_during_compile = (update_mode == SCRIPT_UPDATE_PAUSE_DURING_COMPILE);
 
-            ESP_LOGI(TAG, "Compiler starting deferred job with script scan PAUSED: bytes=%u defer_ms=%lu core=%d priority=%u",
+            if (stop_before_compile) {
+                perf_test_set_plc_running(false);
+            }
+
+            g_pause_start_us.store(pause_start);
+            g_pause_script_for_compile.store(pause_during_compile);
+            if (pause_during_compile) g_total_pause_windows.fetch_add(1);
+
+            ESP_LOGI(TAG, "Compiler starting deferred job: mode=%s bytes=%u defer_ms=%lu core=%d priority=%u",
+                     script_engine_get_update_mode(),
                      (unsigned)job.length,
                      (unsigned long)(SCRIPT_COMPILE_DEFER_TICKS * portTICK_PERIOD_MS),
                      (int)xPortGetCoreID(),
@@ -724,7 +867,7 @@ static void script_compile_task(void*)
             } else {
                 const int64_t pause_us = esp_timer_get_time() - pause_start;
                 g_last_pause_us.store((uint64_t)pause_us);
-                g_pause_script_for_compile.store(false);
+                if (pause_during_compile) g_pause_script_for_compile.store(false);
 
                 g_total_compile_failed.fetch_add(1);
                 g_state.store(SCRIPT_STATE_FAILED);
@@ -972,7 +1115,7 @@ bool script_engine_run_scan(void)
 
         if (g_active_program) {
             const int64_t start_us = esp_timer_get_time();
-            ran = g_active_program->runScan(0.005f);
+            ran = g_active_program->runScan(g_script_delta_time_s);
             const uint32_t run_us = (uint32_t)(esp_timer_get_time() - start_us);
             atomic_max_u32(g_run_scan_us_max, run_us);
             update_run_scan_window_stats(run_us);

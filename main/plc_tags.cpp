@@ -138,6 +138,54 @@ static void add_bool_tag_nolock(const char* name, bool value, const char* desc)
     t.value.b = value;
 }
 
+
+static void add_int_tag_nolock(const char* name, int32_t value, const char* units, const char* desc, bool writable, bool retentive, bool hmi_visible, bool script_visible)
+{
+    if (!name || find_tag_index_nolock(name) >= 0 || g_tag_count >= PLC_TAG_MAX_COUNT) return;
+    RuntimeTag& t = g_tags[g_tag_count++];
+    memset(&t, 0, sizeof(t));
+    snprintf(t.name, sizeof(t.name), "%.*s", (int)(PLC_TAG_NAME_MAX - 1), name);
+    t.type = PLC_TAG_INT;
+    t.writable = writable;
+    t.retentive = retentive;
+    t.hmi_visible = hmi_visible;
+    t.script_visible = script_visible;
+    snprintf(t.description, sizeof(t.description), "%.*s", (int)(PLC_TAG_DESC_MAX - 1), desc ? desc : "");
+    snprintf(t.units, sizeof(t.units), "%.*s", (int)(sizeof(t.units) - 1), units ? units : "");
+    t.value.i = value;
+}
+
+static void add_float_tag_nolock(const char* name, float value, const char* units, const char* desc, bool writable, bool retentive, bool hmi_visible, bool script_visible)
+{
+    if (!name || find_tag_index_nolock(name) >= 0 || g_tag_count >= PLC_TAG_MAX_COUNT) return;
+    RuntimeTag& t = g_tags[g_tag_count++];
+    memset(&t, 0, sizeof(t));
+    snprintf(t.name, sizeof(t.name), "%.*s", (int)(PLC_TAG_NAME_MAX - 1), name);
+    t.type = PLC_TAG_FLOAT;
+    t.writable = writable;
+    t.retentive = retentive;
+    t.hmi_visible = hmi_visible;
+    t.script_visible = script_visible;
+    snprintf(t.description, sizeof(t.description), "%.*s", (int)(PLC_TAG_DESC_MAX - 1), desc ? desc : "");
+    snprintf(t.units, sizeof(t.units), "%.*s", (int)(sizeof(t.units) - 1), units ? units : "");
+    t.value.f = value;
+}
+
+static void ensure_runtime_diagnostic_tags_nolock()
+{
+    add_int_tag_nolock("PLC_ScanCoalescedCount", 0, "scans", "Script scan notifications coalesced/skipped", false, false, true, false);
+    add_int_tag_nolock("PLC_ScanOverrunCount", 0, "scans", "Script scans that exceeded budget", false, false, true, false);
+    add_bool_tag_nolock("PLC_ScanOverrunActive", false, "Script scan is currently over budget");
+    int idx = find_tag_index_nolock("PLC_ScanOverrunActive"); if (idx >= 0) { g_tags[idx].writable = false; g_tags[idx].retentive = false; g_tags[idx].script_visible = false; }
+    add_bool_tag_nolock("PLC_ScanFaultActive", false, "Script scan policy fault active");
+    idx = find_tag_index_nolock("PLC_ScanFaultActive"); if (idx >= 0) { g_tags[idx].writable = false; g_tags[idx].retentive = false; g_tags[idx].script_visible = false; }
+    add_int_tag_nolock("PLC_ScanActualPeriodUs", 0, "us", "Elapsed time between script executions", false, false, true, false);
+    add_int_tag_nolock("PLC_ScanExecutionTimeUs", 0, "us", "Last script scan execution time", false, false, true, false);
+    add_float_tag_nolock("PLC_ScanLoadPercent", 0.0f, "%", "Script execution time divided by budget", false, false, true, false);
+    add_int_tag_nolock("PLC_DeltaTimeUs", 5000, "us", "Clamped elapsed time passed to script", false, false, true, false);
+    add_float_tag_nolock("PLC_DeltaTimeMs", 5.0f, "ms", "Clamped elapsed time passed to script", false, false, true, false);
+}
+
 static void ensure_compatibility_tags_nolock()
 {
     // Compatibility/default user bit used by the current HMI examples and test scripts.
@@ -227,15 +275,18 @@ static bool save_to_nvs_nolock()
     if (!json) return false;
     // Avoid recursive mutex use by writing JSON inline using public helper pattern.
     char* p = json; size_t rem = 8192; int n = snprintf(p, rem, "{\"tags\":["); p += n; rem -= n;
+    bool first_saved = true;
     for (size_t i = 0; i < g_tag_count && rem > 64; ++i) {
         RuntimeTag& t = g_tags[i];
+        if (!t.retentive) continue;
         n = snprintf(p, rem, "%s{\"name\":\"%s\",\"type\":\"%s\",\"writable\":%s,\"retentive\":%s,\"hmi_visible\":%s,\"script_visible\":%s,\"description\":\"%s\",\"units\":\"%s\",\"min\":%.3f,\"max\":%.3f,",
-                     i ? "," : "", t.name, type_to_string(t.type), t.writable?"true":"false", t.retentive?"true":"false", t.hmi_visible?"true":"false", t.script_visible?"true":"false", t.description, t.units, (double)t.min_value, (double)t.max_value);
+                     first_saved ? "" : ",", t.name, type_to_string(t.type), t.writable?"true":"false", t.retentive?"true":"false", t.hmi_visible?"true":"false", t.script_visible?"true":"false", t.description, t.units, (double)t.min_value, (double)t.max_value);
         p += n; rem -= n;
         if (t.type == PLC_TAG_BOOL) n = snprintf(p, rem, "\"value\":%s}", t.value.b?"true":"false");
         else if (t.type == PLC_TAG_INT) n = snprintf(p, rem, "\"value\":%ld}", (long)t.value.i);
         else n = snprintf(p, rem, "\"value\":%.6g}", (double)t.value.f);
         p += n; rem -= n;
+        first_saved = false;
     }
     snprintf(p, rem, "]}");
     nvs_handle_t h;
@@ -355,6 +406,7 @@ bool plc_tags_load_json(const char* json, char* err, size_t err_len)
     xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
     memcpy(g_tags, new_tags, PLC_TAG_MAX_COUNT * sizeof(RuntimeTag));
     g_tag_count = new_count;
+    ensure_runtime_diagnostic_tags_nolock();
     bool saved = save_to_nvs_nolock();
     xSemaphoreGive(g_tags_mutex);
     free(new_tags);
@@ -384,6 +436,7 @@ void plc_tags_init(void)
             }
             nvs_close(h);
         }
+        ensure_runtime_diagnostic_tags_nolock();
         ensure_compatibility_tags_nolock();
         g_loaded = true;
         ESP_LOGI(TAG, "Tag registry initialized: %u tags", (unsigned)g_tag_count);
@@ -412,6 +465,46 @@ bool plc_tags_get(const char* name, PlcTagInfo* out)
     if (idx >= 0) tag_to_info(g_tags[idx], out);
     xSemaphoreGive(g_tags_mutex);
     return idx >= 0;
+}
+
+
+static bool plc_tags_set_internal_value_nolock(const char* name, PlcTagType type, bool b, int32_t i, float f)
+{
+    int idx = find_tag_index_nolock(name);
+    if (idx < 0) return false;
+    RuntimeTag& t = g_tags[idx];
+    if (t.type != type) return false;
+    if (type == PLC_TAG_BOOL) t.value.b = b;
+    else if (type == PLC_TAG_INT) t.value.i = i;
+    else t.value.f = f;
+    return true;
+}
+
+bool plc_tags_set_internal_bool(const char* name, bool value)
+{
+    if (!g_tags_mutex) plc_tags_init();
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    bool ok = plc_tags_set_internal_value_nolock(name, PLC_TAG_BOOL, value, 0, 0.0f);
+    xSemaphoreGive(g_tags_mutex);
+    return ok;
+}
+
+bool plc_tags_set_internal_int(const char* name, int32_t value)
+{
+    if (!g_tags_mutex) plc_tags_init();
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    bool ok = plc_tags_set_internal_value_nolock(name, PLC_TAG_INT, false, value, 0.0f);
+    xSemaphoreGive(g_tags_mutex);
+    return ok;
+}
+
+bool plc_tags_set_internal_float(const char* name, float value)
+{
+    if (!g_tags_mutex) plc_tags_init();
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    bool ok = plc_tags_set_internal_value_nolock(name, PLC_TAG_FLOAT, false, 0, value);
+    xSemaphoreGive(g_tags_mutex);
+    return ok;
 }
 
 bool plc_tags_set_value_bool(const char* name, bool value, char* err, size_t err_len)

@@ -1663,6 +1663,616 @@ static esp_err_t upload_script_post_handler(httpd_req_t *req)
 }
 
 
+
+// -----------------------------------------------------------------------------
+// PiLab runtime settings API
+// -----------------------------------------------------------------------------
+// Runtime POST updates replace the in-RAM JSON for a settings page and mark it
+// dirty. Persistent save is explicit and writes /littlefs/config/<route>.json;
+// the save route reuses flash_write_allowed(), so it is blocked in PLC RUN mode.
+
+#define SETTINGS_MAX_JSON_BYTES 2048
+#define SETTINGS_ROUTE_COUNT 9
+
+typedef struct {
+    const char *route;
+    const char *default_json;
+    char json[SETTINGS_MAX_JSON_BYTES];
+    bool loaded;
+    bool dirty;
+} RuntimeSettingsPage;
+
+static RuntimeSettingsPage g_settings_pages[SETTINGS_ROUTE_COUNT] = {
+    { "system", "{\"deviceName\":\"PiLab PLC\",\"location\":\"Bench / Lab\",\"bootBehavior\":\"stopped\",\"startupScript\":\"\",\"ntpEnabled\":true,\"timezone\":\"America/Toronto\"}", {0}, false, false },
+    { "network", "{\"hostname\":\"pilab-p4\",\"mdnsName\":\"pilab-p4.local\",\"ipMode\":\"static\",\"staticIpv4\":\"192.168.5.210\",\"netmask\":\"255.255.255.0\",\"gateway\":\"192.168.5.1\",\"dns\":\"192.168.5.1\",\"ntpServer\":\"pool.ntp.org\"}", {0}, false, false },
+    { "logging", "{\"espConsoleLogLevel\":\"warn\",\"pilabScriptLogLevel\":\"info\",\"retainedEvents\":250,\"serialConsoleLogs\":true,\"includeCompileLog\":true,\"includeTimingSamples\":true,\"includeTagSnapshot\":true,\"exportFormat\":\"jsonBundle\"}", {0}, false, false },
+    { "script-engine", "{\"compileBeforeRun\":true,\"scriptWatchdog\":true,\"watchdogBudgetUs\":5000,\"startupCompileAction\":\"stopOnError\",\"registeredAddons\":\"Arrays, Math, Strings\",\"tagBinding\":\"auto\",\"scriptUpdateMode\":\"pauseDuringCompile\"}", {0}, false, false },
+    { "performance", "{\"scriptScanBudgetUs\":5000,\"warnAtPercent\":75,\"dashboardPollMs\":1000,\"tagCachePollMs\":100,\"plcDataCacheMs\":100,\"telemetryEnabled\":true,\"overrunPolicy\":\"faultAfterLimit\",\"scriptTimeMode\":\"actualClamped\",\"maxDeltaUs\":50000,\"faultAfterConsecutiveOverruns\":20,\"faultAfterCoalescedScans\":100}", {0}, false, false },
+    { "storage", "{\"writesWhileRunning\":\"blocked\",\"backupPath\":\"/backups\",\"userFilesRoot\":\"/user\",\"maxUploadKb\":512,\"configSaveMode\":\"atomic\",\"keepBackups\":5}", {0}, false, false },
+    { "security", "{\"authentication\":\"disabled\",\"writeConfirmation\":true,\"sessionTimeoutMin\":30,\"apiTokenConfigured\":false,\"corsPolicy\":\"sameOrigin\",\"readonlyGuestMode\":false}", {0}, false, false },
+    { "updates", "{\"firmwareVersion\":\"Development build\",\"webAppVersion\":\"Development build\",\"updateMethod\":\"manual\",\"rollbackSlot\":\"notConfigured\",\"preUpdateAction\":\"stopPlc\",\"backupBeforeUpdate\":true}", {0}, false, false },
+    { "diagnostics", "{\"includeRuntimeStatus\":true,\"includeTaskStats\":true,\"includeHeapInfo\":true,\"includeFileManifest\":true,\"includeScriptSource\":\"optional\",\"snapshotFormat\":\"jsonText\"}", {0}, false, false },
+};
+
+static RuntimeSettingsPage *settings_find_page(const char *route)
+{
+    if (!route || !route[0]) {
+        return NULL;
+    }
+    for (size_t i = 0; i < SETTINGS_ROUTE_COUNT; ++i) {
+        if (strcmp(g_settings_pages[i].route, route) == 0) {
+            return &g_settings_pages[i];
+        }
+    }
+    return NULL;
+}
+
+static void settings_path_for(const RuntimeSettingsPage *page, char *out, size_t out_len)
+{
+    snprintf(out, out_len, PLC_FS_MOUNT_POINT "/config/%s.json", page->route);
+}
+
+// Minimal JSON object sanity check used to avoid adding another ESP-IDF
+// component dependency. The Settings API stores page settings as JSON text
+// and returns that object inside a small response wrapper. Full schema
+// validation can be added per page later.
+static bool settings_json_looks_like_object(const char *text)
+{
+    if (!text) {
+        return false;
+    }
+
+    const char *start = text;
+    while (*start == ' ' || *start == '\t' || *start == '\r' || *start == '\n') {
+        ++start;
+    }
+    if (*start != '{') {
+        return false;
+    }
+
+    const char *end = text + strlen(text);
+    while (end > start && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r' || end[-1] == '\n')) {
+        --end;
+    }
+    if (end <= start || end[-1] != '}') {
+        return false;
+    }
+
+    int depth = 0;
+    bool in_string = false;
+    bool escape = false;
+
+    for (const char *p = start; p < end; ++p) {
+        char c = *p;
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (in_string) {
+            if (c == '\\') {
+                escape = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+        if (c == '"') {
+            in_string = true;
+        } else if (c == '{') {
+            ++depth;
+        } else if (c == '}') {
+            --depth;
+            if (depth < 0) {
+                return false;
+            }
+        }
+    }
+
+    return depth == 0 && !in_string && !escape;
+}
+
+static bool settings_copy_json_object(char *dst, size_t dst_len, const char *src)
+{
+    if (!dst || dst_len == 0 || !settings_json_looks_like_object(src)) {
+        return false;
+    }
+    size_t len = strlen(src);
+    if (len >= dst_len) {
+        return false;
+    }
+    memcpy(dst, src, len + 1);
+    return true;
+}
+
+
+// -----------------------------------------------------------------------------
+// Settings page specific runtime apply hooks
+// -----------------------------------------------------------------------------
+// The Settings API stores and persists page JSON as text, but runtime behavior
+// must still be applied by the subsystem that owns each setting. These small
+// helpers intentionally extract only the fields currently used by firmware.
+
+static bool settings_json_get_string_value(const char *json,
+                                           const char *key,
+                                           char *out,
+                                           size_t out_len)
+{
+    if (!json || !key || !out || out_len == 0) {
+        return false;
+    }
+
+    char needle[80];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+
+    const char *p = strstr(json, needle);
+    if (!p) {
+        return false;
+    }
+
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+    if (*p != ':') return false;
+    ++p;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+    if (*p != '"') return false;
+    ++p;
+
+    size_t n = 0;
+    bool escape = false;
+    while (*p) {
+        char c = *p++;
+        if (escape) {
+            if (n + 1 < out_len) out[n++] = c;
+            escape = false;
+            continue;
+        }
+        if (c == '\\') {
+            escape = true;
+            continue;
+        }
+        if (c == '"') {
+            out[n] = '\0';
+            return true;
+        }
+        if (n + 1 < out_len) {
+            out[n++] = c;
+        }
+    }
+
+    out[0] = '\0';
+    return false;
+}
+
+static bool settings_json_get_bool_value(const char *json,
+                                         const char *key,
+                                         bool default_value)
+{
+    if (!json || !key) {
+        return default_value;
+    }
+
+    char needle[80];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+
+    const char *p = strstr(json, needle);
+    if (!p) {
+        return default_value;
+    }
+
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+    if (*p != ':') return default_value;
+    ++p;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+
+    if (strncmp(p, "true", 4) == 0) return true;
+    if (strncmp(p, "false", 5) == 0) return false;
+    return default_value;
+}
+
+
+static int settings_json_get_int_value(const char *json,
+                                       const char *key,
+                                       int default_value)
+{
+    if (!json || !key) {
+        return default_value;
+    }
+
+    char needle[80];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+
+    const char *p = strstr(json, needle);
+    if (!p) {
+        return default_value;
+    }
+
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+    if (*p != ':') return default_value;
+    ++p;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+
+    return (int)strtol(p, NULL, 10);
+}
+
+static PlcOverrunPolicy settings_parse_overrun_policy(const char *text)
+{
+    if (!text || !text[0]) return PLC_OVERRUN_FAULT_AFTER_LIMIT;
+    if (strcasecmp(text, "coalesce") == 0 || strcasecmp(text, "coalesceContinue") == 0) return PLC_OVERRUN_COALESCE_CONTINUE;
+    if (strcasecmp(text, "warn") == 0 || strcasecmp(text, "warnContinue") == 0) return PLC_OVERRUN_WARN_CONTINUE;
+    if (strcasecmp(text, "fault") == 0 || strcasecmp(text, "faultAfterLimit") == 0) return PLC_OVERRUN_FAULT_AFTER_LIMIT;
+    if (strcasecmp(text, "stop") == 0 || strcasecmp(text, "stopImmediately") == 0) return PLC_OVERRUN_STOP_IMMEDIATELY;
+    if (strcasecmp(text, "edge") == 0 || strcasecmp(text, "edgeTask") == 0) return PLC_OVERRUN_EDGE_TASK;
+    return PLC_OVERRUN_FAULT_AFTER_LIMIT;
+}
+
+static PlcScriptTimeMode settings_parse_script_time_mode(const char *text)
+{
+    if (!text || !text[0]) return PLC_TIME_ACTUAL_CLAMPED;
+    if (strcasecmp(text, "nominal") == 0) return PLC_TIME_NOMINAL;
+    if (strcasecmp(text, "actual") == 0) return PLC_TIME_ACTUAL;
+    if (strcasecmp(text, "actualClamped") == 0 || strcasecmp(text, "clamped") == 0) return PLC_TIME_ACTUAL_CLAMPED;
+    return PLC_TIME_ACTUAL_CLAMPED;
+}
+
+
+static void settings_apply_script_engine_settings(const char *json)
+{
+    char mode[48] = "pauseDuringCompile";
+    settings_json_get_string_value(json, "scriptUpdateMode", mode, sizeof(mode));
+    script_engine_set_update_mode(mode);
+}
+
+static void settings_apply_performance_settings(const char *json)
+{
+    PlcRuntimePolicy policy;
+    perf_test_get_runtime_policy(&policy);
+
+    char overrun_policy[40] = "faultAfterLimit";
+    char time_mode[40] = "actualClamped";
+    settings_json_get_string_value(json, "overrunPolicy", overrun_policy, sizeof(overrun_policy));
+    settings_json_get_string_value(json, "scriptTimeMode", time_mode, sizeof(time_mode));
+
+    policy.overrun_policy = settings_parse_overrun_policy(overrun_policy);
+    policy.time_mode = settings_parse_script_time_mode(time_mode);
+    policy.script_budget_us = (uint32_t)settings_json_get_int_value(json, "scriptScanBudgetUs", 5000);
+    policy.max_delta_us = (uint32_t)settings_json_get_int_value(json, "maxDeltaUs", 50000);
+    policy.fault_after_consecutive_overruns = (uint32_t)settings_json_get_int_value(json, "faultAfterConsecutiveOverruns", 20);
+    policy.fault_after_coalesced_scans = (uint32_t)settings_json_get_int_value(json, "faultAfterCoalescedScans", 100);
+
+    perf_test_set_runtime_policy(&policy);
+}
+
+static esp_log_level_t settings_parse_esp_log_level(const char *level)
+{
+    if (!level || !level[0]) return ESP_LOG_WARN;
+    if (strcasecmp(level, "off") == 0 || strcasecmp(level, "none") == 0) return ESP_LOG_NONE;
+    if (strcasecmp(level, "error") == 0 || strcasecmp(level, "err") == 0) return ESP_LOG_ERROR;
+    if (strcasecmp(level, "warn") == 0 || strcasecmp(level, "warning") == 0) return ESP_LOG_WARN;
+    if (strcasecmp(level, "info") == 0) return ESP_LOG_INFO;
+    if (strcasecmp(level, "debug") == 0) return ESP_LOG_DEBUG;
+    if (strcasecmp(level, "verbose") == 0 || strcasecmp(level, "trace") == 0) return ESP_LOG_VERBOSE;
+    return ESP_LOG_WARN;
+}
+
+static void settings_apply_logging_settings(const char *json, bool allow_console_off)
+{
+    char esp_level_text[32] = "warn";
+    char script_level_text[32] = "info";
+
+    // Current field names.
+    settings_json_get_string_value(json, "espConsoleLogLevel", esp_level_text, sizeof(esp_level_text));
+    settings_json_get_string_value(json, "pilabScriptLogLevel", script_level_text, sizeof(script_level_text));
+
+    // Backward compatibility with the first Settings UI build.
+    settings_json_get_string_value(json, "systemLogLevel", esp_level_text, sizeof(esp_level_text));
+    settings_json_get_string_value(json, "scriptLogLevel", script_level_text, sizeof(script_level_text));
+
+    bool serial_console_logs = settings_json_get_bool_value(json, "serialConsoleLogs", true);
+    esp_log_level_t esp_level = serial_console_logs ? settings_parse_esp_log_level(esp_level_text) : ESP_LOG_NONE;
+
+    // Do not allow saved config to silence all boot diagnostics before the
+    // firmware has completed startup and the web UI is reachable. POST requests
+    // and the final post-webserver boot apply pass set allow_console_off=true.
+    if (!allow_console_off && esp_level == ESP_LOG_NONE) {
+        esp_level = ESP_LOG_WARN;
+    }
+
+    esp_log_level_set("*", esp_level);
+    script_engine_set_runtime_log_level(script_level_text);
+
+    ESP_LOGI(TAG, "Logging settings applied: espConsole=%s%s, pilabScript=%s",
+             esp_level_text,
+             serial_console_logs ? "" : " (serial disabled)",
+             script_level_text);
+}
+
+static void settings_apply_runtime_page(RuntimeSettingsPage *page, bool allow_console_off)
+{
+    if (!page) {
+        return;
+    }
+
+    if (strcmp(page->route, "logging") == 0) {
+        const char *json = settings_json_looks_like_object(page->json) ? page->json : page->default_json;
+        settings_apply_logging_settings(json, allow_console_off);
+    } else if (strcmp(page->route, "performance") == 0) {
+        const char *json = settings_json_looks_like_object(page->json) ? page->json : page->default_json;
+        settings_apply_performance_settings(json);
+    } else if (strcmp(page->route, "script-engine") == 0) {
+        const char *json = settings_json_looks_like_object(page->json) ? page->json : page->default_json;
+        settings_apply_script_engine_settings(json);
+    }
+}
+
+static void settings_ensure_loaded(RuntimeSettingsPage *page);
+
+static void settings_apply_after_webserver_ready(void)
+{
+    RuntimeSettingsPage *logging = settings_find_page("logging");
+    if (logging) {
+        settings_ensure_loaded(logging);
+        settings_apply_runtime_page(logging, true);
+    }
+    RuntimeSettingsPage *performance = settings_find_page("performance");
+    if (performance) {
+        settings_ensure_loaded(performance);
+        settings_apply_runtime_page(performance, true);
+    }
+    RuntimeSettingsPage *script_engine = settings_find_page("script-engine");
+    if (script_engine) {
+        settings_ensure_loaded(script_engine);
+        settings_apply_runtime_page(script_engine, true);
+    }
+}
+
+static void settings_ensure_loaded(RuntimeSettingsPage *page)
+{
+    if (!page || page->loaded) {
+        return;
+    }
+
+    strncpy(page->json, page->default_json, sizeof(page->json) - 1);
+    page->json[sizeof(page->json) - 1] = '\0';
+
+    char path[160] = {0};
+    settings_path_for(page, path, sizeof(path));
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        page->loaded = true;
+        page->dirty = false;
+        ESP_LOGI(TAG, "Settings default loaded for %s", page->route);
+        return;
+    }
+
+    size_t n = fread(page->json, 1, sizeof(page->json) - 1, f);
+    fclose(f);
+    page->json[n] = '\0';
+
+    if (!settings_json_looks_like_object(page->json)) {
+        ESP_LOGW(TAG, "Invalid saved settings for %s; using defaults", page->route);
+        strncpy(page->json, page->default_json, sizeof(page->json) - 1);
+        page->json[sizeof(page->json) - 1] = '\0';
+    }
+
+    page->loaded = true;
+    page->dirty = false;
+    ESP_LOGI(TAG, "Settings loaded for %s from %s", page->route, path);
+}
+
+static esp_err_t settings_read_body(httpd_req_t *req, char *out, size_t out_len)
+{
+    if (!out || out_len == 0) {
+        return ESP_FAIL;
+    }
+    if (req->content_len == 0 || req->content_len >= out_len) {
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"settings_payload_too_large\"}");
+        return ESP_FAIL;
+    }
+
+    size_t received = 0;
+    while (received < req->content_len) {
+        int r = httpd_req_recv(req, out + received, req->content_len - received);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (r <= 0) {
+            return ESP_FAIL;
+        }
+        received += (size_t)r;
+    }
+    out[received] = '\0';
+    return ESP_OK;
+}
+
+static bool settings_parse_uri(const char *uri, char *route, size_t route_len, bool *out_save)
+{
+    static const char *prefix = "/api/settings/";
+    if (!uri || strncmp(uri, prefix, strlen(prefix)) != 0) {
+        return false;
+    }
+
+    const char *p = uri + strlen(prefix);
+    if (!p[0]) {
+        return false;
+    }
+
+    const char *slash = strchr(p, '/');
+    size_t n = slash ? (size_t)(slash - p) : strlen(p);
+    if (n == 0 || n >= route_len) {
+        return false;
+    }
+    memcpy(route, p, n);
+    route[n] = '\0';
+
+    *out_save = false;
+    if (slash && strcmp(slash, "/save") == 0) {
+        *out_save = true;
+    } else if (slash) {
+        return false;
+    }
+    return true;
+}
+
+static esp_err_t settings_send_page(httpd_req_t *req, RuntimeSettingsPage *page)
+{
+    settings_ensure_loaded(page);
+
+    const char *settings_json = settings_json_looks_like_object(page->json) ? page->json : page->default_json;
+
+    size_t needed = strlen(settings_json) + 256;
+    char *text = (char *)heap_caps_malloc(needed, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!text) {
+        text = (char *)heap_caps_malloc(needed, MALLOC_CAP_8BIT);
+    }
+    if (!text) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out_of_memory\"}");
+        return ESP_OK;
+    }
+
+    int n = snprintf(text, needed,
+        "{\"ok\":true,\"route\":\"%s\",\"dirty\":%s,\"saved\":%s,\"flashWritesAllowed\":%s,\"settings\":%s}",
+        page->route,
+        page->dirty ? "true" : "false",
+        page->dirty ? "false" : "true",
+        perf_test_is_plc_running() ? "false" : "true",
+        settings_json);
+
+    if (n < 0 || (size_t)n >= needed) {
+        free(text);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"settings_response_too_large\"}");
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_sendstr(req, text);
+    free(text);
+    return ESP_OK;
+}
+
+static esp_err_t settings_get_handler(httpd_req_t *req)
+{
+    char route[48] = {0};
+    bool save = false;
+    if (!settings_parse_uri(req->uri, route, sizeof(route), &save) || save) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unknown_settings_route\"}");
+        return ESP_OK;
+    }
+
+    RuntimeSettingsPage *page = settings_find_page(route);
+    if (!page) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unknown_settings_page\"}");
+        return ESP_OK;
+    }
+
+    return settings_send_page(req, page);
+}
+
+static esp_err_t settings_save_page(httpd_req_t *req, RuntimeSettingsPage *page)
+{
+    if (!flash_write_allowed(req)) {
+        return ESP_OK;
+    }
+
+    settings_ensure_loaded(page);
+
+    char path[160] = {0};
+    char tmp_path[180] = {0};
+    settings_path_for(page, path, sizeof(path));
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+
+    FILE *f = fopen(tmp_path, "w");
+    if (!f) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"open_failed\"}");
+        return ESP_OK;
+    }
+
+    size_t len = strlen(page->json);
+    size_t written = fwrite(page->json, 1, len, f);
+    fclose(f);
+
+    if (written != len) {
+        unlink(tmp_path);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"write_failed\"}");
+        return ESP_OK;
+    }
+
+    unlink(path);
+    if (rename(tmp_path, path) != 0) {
+        unlink(tmp_path);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"rename_failed\"}");
+        return ESP_OK;
+    }
+
+    page->dirty = false;
+    ESP_LOGI(TAG, "Settings saved for %s to %s", page->route, path);
+    return settings_send_page(req, page);
+}
+
+static esp_err_t settings_post_handler(httpd_req_t *req)
+{
+    char route[48] = {0};
+    bool save = false;
+    if (!settings_parse_uri(req->uri, route, sizeof(route), &save)) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unknown_settings_route\"}");
+        return ESP_OK;
+    }
+
+    RuntimeSettingsPage *page = settings_find_page(route);
+    if (!page) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unknown_settings_page\"}");
+        return ESP_OK;
+    }
+
+    if (save) {
+        return settings_save_page(req, page);
+    }
+
+    char body[SETTINGS_MAX_JSON_BYTES] = {0};
+    if (settings_read_body(req, body, sizeof(body)) != ESP_OK) {
+        return ESP_OK;
+    }
+
+    if (!settings_copy_json_object(page->json, sizeof(page->json), body)) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"invalid_json\"}");
+        return ESP_OK;
+    }
+
+    page->loaded = true;
+    page->dirty = true;
+
+    settings_apply_runtime_page(page, true);
+
+    ESP_LOGI(TAG, "Runtime settings applied for %s; persistent save not performed", page->route);
+    return settings_send_page(req, page);
+}
+
+
 static void register_uri_checked(httpd_handle_t server, const httpd_uri_t *uri)
 {
     esp_err_t err = httpd_register_uri_handler(server, uri);
@@ -1703,7 +2313,8 @@ config.core_id = 1;
 
 // Default ESP-IDF HTTPD URI slots are easy to exhaust once /hmi and
 // /api/plc_data are added. Keep enough room for future HMI/API routes.
-config.max_uri_handlers = 40;
+config.max_uri_handlers = 64;
+config.uri_match_fn = httpd_uri_match_wildcard;
 
 
 
@@ -1797,6 +2408,14 @@ config.max_uri_handlers = 40;
         .user_ctx = NULL
     };
     register_uri_checked(g_http_server, &script_uri);
+
+    httpd_uri_t settings_page_uri = {
+        .uri = "/settings",
+        .method = HTTP_GET,
+        .handler = spa_index_get_handler,
+        .user_ctx = NULL
+    };
+    register_uri_checked(g_http_server, &settings_page_uri);
 
     httpd_uri_t app_js_uri = {
         .uri = "/assets/app.js",
@@ -1929,6 +2548,22 @@ httpd_uri_t large_status_uri = {
     };
     register_uri_checked(g_http_server, &plc_mode_post_uri);
 
+    httpd_uri_t settings_get_uri = {
+        .uri = "/api/settings/*",
+        .method = HTTP_GET,
+        .handler = settings_get_handler,
+        .user_ctx = NULL
+    };
+    register_uri_checked(g_http_server, &settings_get_uri);
+
+    httpd_uri_t settings_post_uri = {
+        .uri = "/api/settings/*",
+        .method = HTTP_POST,
+        .handler = settings_post_handler,
+        .user_ctx = NULL
+    };
+    register_uri_checked(g_http_server, &settings_post_uri);
+
     httpd_uri_t files_list_uri = {
         .uri = "/api/files/list",
         .method = HTTP_GET,
@@ -1976,6 +2611,10 @@ httpd_uri_t large_status_uri = {
         .user_ctx = NULL
     };
     register_uri_checked(g_http_server, &files_mkdir_uri);
+
+    // The web server is now reachable. It is safe to honor a saved/requested
+    // ESP_LOG_NONE setting without hiding boot diagnostics.
+    settings_apply_after_webserver_ready();
 }
 
 static void eth_event_handler(

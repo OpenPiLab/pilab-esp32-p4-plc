@@ -9,7 +9,7 @@ class asIScriptEngine;
 extern "C" {
 #endif
 
-#define PLC_TAG_MAX_COUNT 64
+#define PLC_TAG_MAX_COUNT 96
 #define PLC_TAG_NAME_MAX 32
 #define PLC_TAG_DESC_MAX 64
 
@@ -46,6 +46,9 @@ bool plc_tags_set_value_from_text(const char* name, const char* value_text, char
 bool plc_tags_set_value_bool(const char* name, bool value, char* err, size_t err_len);
 bool plc_tags_set_value_int(const char* name, int32_t value, char* err, size_t err_len);
 bool plc_tags_set_value_float(const char* name, float value, char* err, size_t err_len);
+bool plc_tags_set_internal_bool(const char* name, bool value);
+bool plc_tags_set_internal_int(const char* name, int32_t value);
+bool plc_tags_set_internal_float(const char* name, float value);
 void plc_tags_get_json(char* out, size_t out_len);
 bool plc_tags_load_json(const char* json, char* err, size_t err_len);
 bool plc_tags_write_value_json(const char* json, char* err, size_t err_len);

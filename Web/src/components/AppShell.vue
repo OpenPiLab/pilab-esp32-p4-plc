@@ -15,6 +15,7 @@
           <RouterLink to="/hmi">HMI</RouterLink>
           <RouterLink to="/tags">Tags</RouterLink>
           <RouterLink to="/files">Files</RouterLink>
+          <RouterLink to="/settings" class="app-settings-link" title="Settings" aria-label="Settings">⚙</RouterLink>
         </nav>
       </div>
     </header>

@@ -8,6 +8,12 @@
 extern "C" {
 #endif
 
+typedef enum ScriptUpdateMode {
+    SCRIPT_UPDATE_STOP_BEFORE_COMPILE = 0,
+    SCRIPT_UPDATE_PAUSE_DURING_COMPILE = 1,
+    SCRIPT_UPDATE_ONLINE_HOT_SWAP = 2
+} ScriptUpdateMode;
+
 typedef enum ScriptCompileState {
     SCRIPT_STATE_IDLE = 0,
     SCRIPT_STATE_QUEUED = 1,
@@ -36,6 +42,7 @@ bool script_engine_submit_compile_text(const char* script_text, size_t script_le
 bool script_engine_can_accept_upload(char* response_buf, size_t response_buf_len);
 
 // Called by the deterministic scan task. Executes the currently active compiled scan().
+void script_engine_set_scan_timing(uint32_t delta_us, uint32_t actual_period_us, uint32_t budget_us);
 bool script_engine_run_scan(void);
 
 uint32_t script_engine_get_generation(void);
@@ -48,6 +55,13 @@ void script_engine_get_pending_script_name(char* out, size_t out_len);
 
 // JSON status helper for /api/script_status.
 void script_engine_get_status_json(char* out, size_t out_len);
+
+// PiLab/script runtime log filter. This is intentionally independent from the
+// ESP-IDF console log level controlled by esp_log_level_set().
+void script_engine_set_runtime_log_level(const char* level);
+const char* script_engine_get_runtime_log_level(void);
+void script_engine_set_update_mode(const char* mode);
+const char* script_engine_get_update_mode(void);
 
 #ifdef __cplusplus
 }
