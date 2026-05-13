@@ -71,6 +71,67 @@ The goal is to create a lightweight, modern, browser-first automation platform w
 
 ---
 
+# Origins of the Project
+
+PiLab did not originate as a hobby PLC project.
+
+The architectural ideas behind the system trace back to earlier work on distributed real-time engine test automation systems developed for industrial dynamometer test cells.
+
+The original concepts were explored in the 2012 University of Windsor thesis:
+
+**“Design of an Engine Test Cell Control System”**  
+by Anthony Joseph Fountaine
+
+- University of Windsor Thesis Archive  
+  https://uwindsor.scholaris.ca/items/46d8b135-747a-49b3-b691-0cdcc43894aa
+
+- Direct Thesis URI  
+  https://hdl.handle.net/20.500.14776/5353
+
+## Thesis Summary
+
+The thesis explored:
+
+- Distributed data acquisition architectures
+- Real-time machine sequencing
+- Automated engine test execution
+- Fault detection and alarming
+- Long-term test data analysis
+- Integration of real-time systems with graphical user interfaces
+
+The system used a distributed architecture that moved acquisition hardware closer to the sensors while coordinating testing through a real-time operating system and Windows-based operator interface.
+
+A custom sequencer was developed to create and execute complex automated engine tests.
+
+The resulting system was deployed in multiple dynamometer test cells operating continuously in industrial environments.
+
+## Relationship to PiLab
+
+PiLab can be viewed as a modern continuation of many of those ideas using:
+
+- Embedded edge hardware
+- Browser-first engineering tools
+- Embedded web technologies
+- Runtime scripting
+- Lightweight deployment
+- Self-hosted interfaces
+- AI-assisted engineering workflows
+
+Rather than attempting to recreate traditional PLC environments, the project explores what modern machine orchestration and automation systems might look like if designed using contemporary software and web development concepts.
+
+The project intentionally combines concepts from:
+
+- PLC scan-based execution
+- Embedded systems
+- Industrial sequencing
+- Browser-native tooling
+- Runtime scripting environments
+- Modern web application architecture
+
+The goal is not simply to build another PLC/HMI, but to explore a more flexible and software-defined approach to industrial control and machine orchestration.
+
+---
+
 # Example PLC / Edge Scripts
 
 ## Analog Signal Processing + Heartbeat
