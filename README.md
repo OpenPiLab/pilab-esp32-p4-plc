@@ -38,7 +38,7 @@ This editor is still experimental but already supports:
 - AngelScript generation
 
 
-👉 Try the P4 root pages directly in your browser here:
+👉 Try the P4 root pages directly in your browser here (not fully functional without hardware):
 
 https://openpilab.github.io/pilab-esp32-p4-plc/experimental/web/index.html
 
