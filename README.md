@@ -6,6 +6,39 @@ PiLab P4 is an experimental browser-first PLC/HMI platform running directly on t
 # Web App
 ![PiLab PLC Command Center](docs/images/command-center.png)
 
+---
+## Browser-Based Ladder Logic Editor (Experimental)
+
+PiLab now includes an experimental browser-based ladder logic editor with:
+
+- Wire-node branch modeling
+- Live ladder simulation
+- TON / TOF / CTU / CTD support
+- JSON ladder project model
+- Readable AngelScript transpilation
+- Mixed ladder + AngelScript rungs
+- Real-time wire/contact highlighting
+
+### Live Demo
+
+👉 Try it directly in your browser:
+
+https://openpilab.github.io/pilab-esp32-p4-plc/experimental/pilab_ladder_editor.html
+
+No installation required.
+
+### Current Status
+
+This editor is still experimental but already supports:
+- Ladder drawing
+- Branch editing
+- Validation
+- Simulation
+- JSON import/export
+- AngelScript generation
+
+
+---
 # System Architecture
 
 ```mermaid
