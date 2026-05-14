@@ -23,7 +23,7 @@ PiLab now includes an experimental browser-based ladder logic editor with:
 
 👉 Try it directly in your browser:
 
-https://openpilab.github.io/pilab-esp32-p4-plc/experimental/pilab_ladder_editor.html
+https://openpilab.github.io/pilab-esp32-p4-plc/experimental/ladder/pilab_ladder_editor.html
 
 No installation required.
 
@@ -37,6 +37,10 @@ This editor is still experimental but already supports:
 - JSON import/export
 - AngelScript generation
 
+
+👉 Try the P4 root pages directly in your browser here:
+
+https://openpilab.github.io/pilab-esp32-p4-plc/experimental/web/index.html
 
 ---
 # System Architecture
