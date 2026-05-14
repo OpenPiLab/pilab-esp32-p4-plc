@@ -1,0 +1,1624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>PiLab Ladder Logic Editor - Insert Rungs</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin:0;
+    overflow:hidden;
+    background:
+      radial-gradient(circle at 18% 0%, rgba(34,211,238,.08), transparent 28%),
+      radial-gradient(circle at 88% 12%, rgba(59,130,246,.08), transparent 30%),
+      #07111d;
+    color:#e5edf7;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .glass {
+    background: rgba(15,23,42,.84);
+    border: 1px solid rgba(100,116,139,.34);
+    box-shadow: 0 18px 55px rgba(0,0,0,.34);
+    backdrop-filter: blur(12px);
+  }
+  .panel {
+    background: rgba(2,6,23,.72);
+    border:1px solid rgba(51,65,85,.9);
+  }
+  .canvas-bg {
+    background-color:#081321;
+    background-image:
+      linear-gradient(rgba(148,163,184,.07) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(148,163,184,.07) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+  .btn { transition: 120ms ease; user-select:none; }
+  .btn:hover { transform: translateY(-1px); }
+  .scrollbar::-webkit-scrollbar { width:10px; height:10px; }
+  .scrollbar::-webkit-scrollbar-thumb { background:#334155; border-radius:999px; }
+  .scrollbar::-webkit-scrollbar-track { background:#020617; }
+</style>
+</head>
+<body>
+<div id="app" class="h-screen p-3 grid grid-rows-[76px_1fr] gap-3">
+  <header class="glass rounded-2xl px-4 py-3 flex items-center justify-between gap-3 overflow-hidden">
+    <div class="flex items-center gap-3 min-w-0">
+      <div class="w-11 h-11 rounded-xl border border-cyan-300/40 bg-cyan-400/10 text-cyan-300 flex items-center justify-center font-black">P</div>
+      <div class="min-w-0">
+        <h1 class="text-2xl font-bold truncate">PiLab Ladder Logic Editor</h1>
+        <p class="text-sm text-slate-400 truncate">Correct branch model: branches connect wire-node to wire-node, not contact-center to contact-center.</p>
+      </div>
+    </div>
+    <div class="flex flex-wrap justify-end gap-2 shrink-0">
+      <button @click="addRung" class="btn px-4 py-2 rounded-xl border border-cyan-300/40 bg-cyan-500/15 text-cyan-100 font-semibold">+ Ladder Rung</button>
+      <button @click="addScriptRung" class="btn px-4 py-2 rounded-xl border border-purple-300/40 bg-purple-500/15 text-purple-100 font-semibold">+ AngelScript Rung</button>
+      <button @click="undo" :disabled="!history.length" class="btn px-4 py-2 rounded-xl border border-slate-500/60 bg-slate-700/50 font-semibold disabled:opacity-40 disabled:cursor-not-allowed">Undo</button>
+      <button @click="saveLocal" class="btn px-4 py-2 rounded-xl border border-emerald-300/35 bg-emerald-500/15 text-emerald-100 font-semibold">Save</button>
+      <button @click="loadLocal" class="btn px-4 py-2 rounded-xl border border-blue-300/35 bg-blue-500/15 text-blue-100 font-semibold">Load</button>
+      <button @click="$refs.jsonImport.click()" class="btn px-4 py-2 rounded-xl border border-indigo-300/35 bg-indigo-500/15 text-indigo-100 font-semibold">Import JSON</button>
+      <input ref="jsonImport" type="file" accept=".json,application/json" class="hidden" @change="importJsonFile"/>
+      <button @click="downloadJson" class="btn px-4 py-2 rounded-xl border border-slate-500/60 bg-slate-700/50 font-semibold">Export JSON</button>
+      <button @click="downloadAs" class="btn px-4 py-2 rounded-xl border border-amber-300/35 bg-amber-500/15 text-amber-100 font-semibold">Export AngelScript</button>
+    </div>
+  </header>
+
+  <main class="grid grid-cols-[270px_minmax(620px,1fr)_380px] gap-3 min-h-0">
+
+    <aside class="glass rounded-2xl p-4 min-h-0 overflow-auto scrollbar">
+      <h2 class="text-xs font-bold tracking-widest text-slate-400 uppercase mb-3">Palette</h2>
+      <div class="space-y-2">
+        <button v-for="t in tools" :key="t.type"
+          draggable="true"
+          @dragstart="dragTool(t.type)"
+          @click="selectedTool=t.type; mode='place'"
+          class="w-full text-left rounded-xl p-3 border btn"
+          :class="selectedTool===t.type && mode==='place' ? 'bg-cyan-500/15 border-cyan-300/50' : 'bg-slate-950/45 border-slate-700 hover:border-slate-500'">
+          <div class="flex items-center gap-3">
+            <div class="w-12 h-10 rounded-lg border border-slate-600 flex items-center justify-center" v-html="t.icon"></div>
+            <div class="flex-1 min-w-0">
+              <div class="font-semibold truncate">{{t.label}}</div>
+              <div class="text-xs text-slate-400">{{t.desc}}</div>
+            </div>
+            <div class="mono text-xs text-slate-500">{{t.type}}</div>
+          </div>
+        </button>
+      </div>
+
+      <div class="mt-4 panel rounded-xl p-3">
+        <h3 class="text-xs font-bold tracking-widest text-slate-400 uppercase mb-2">Tools</h3>
+        <div class="space-y-2">
+          <button @click="mode='select'; branchStart=null" class="w-full px-3 py-2 rounded-lg border text-left btn" :class="mode==='select'?'bg-cyan-500/15 border-cyan-300/50':'bg-slate-900 border-slate-700'">↖ Select / Move</button>
+          <button @click="mode='branch'; branchStart=null; show('Branch Tool: click start wire node, then end wire node')" class="w-full px-3 py-2 rounded-lg border text-left btn" :class="mode==='branch'?'bg-blue-500/20 border-blue-300/60':'bg-slate-900 border-slate-700'">⎇ Draw Branch</button>
+          <button @click="mode='delete'" class="w-full px-3 py-2 rounded-lg border text-left btn" :class="mode==='delete'?'bg-red-500/20 border-red-300/60':'bg-slate-900 border-slate-700'">⌫ Delete Element</button>
+          <button v-if="selectedBranch" @click="deleteBranch(selectedBranch.rung, selectedBranch.branchId)" class="w-full px-3 py-2 rounded-lg border text-left btn bg-red-500/15 border-red-300/50 text-red-100">✕ Delete Selected Branch</button>
+        </div>
+      </div>
+
+      <div class="mt-4 panel rounded-xl p-3">
+        <h3 class="font-semibold mb-2">How to use</h3>
+        <ol class="text-xs text-slate-400 space-y-1 list-decimal ml-4">
+          <li>Select or drag a symbol into a faint slot.</li>
+          <li>Select <b>Draw Branch</b>.</li>
+          <li>Click a wire node where the branch starts.</li>
+          <li>Click another wire node where the branch ends.</li>
+          <li>Click any branch wire or branch contact to select/delete that branch.</li>
+        </ol>
+      </div>
+    </aside>
+
+    <section class="glass rounded-2xl min-h-0 overflow-hidden grid grid-rows-[54px_1fr_34px]">
+      <div class="px-4 py-3 border-b border-slate-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="font-bold leading-tight">Ladder Canvas</h2>
+          <p class="text-xs text-slate-400 truncate">
+            {{ mode==='branch'
+              ? (branchStart ? 'Click the end wire node. Main and branch wire nodes are valid.' : 'Click the start wire node. Main and branch wire nodes are valid.')
+              : 'Branches attach to wire nodes between instructions.' }}
+          </p>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+          <span class="text-xs text-slate-400">Mode:</span>
+          <span class="mono text-xs px-2 py-1 rounded border border-cyan-300/30 bg-cyan-500/10 text-cyan-200">{{ mode }}</span>
+          <button @click="sampleProject" class="btn px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-600 text-xs">Load Sample</button>
+          <button @click="clearAll" class="btn px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-300/30 text-red-200 text-xs">Clear All</button>
+        </div>
+      </div>
+
+      <div class="canvas-bg overflow-y-auto overflow-x-hidden scrollbar min-h-0">
+        <div class="p-4">
+          <div v-for="(rung, rIndex) in project.rungs" :key="rung.id" class="mb-4">
+            <div class="flex items-center gap-2 mb-2 flex-wrap">
+              <div class="mono text-sm text-slate-300 flex items-center gap-2 min-w-[360px]">
+                <span class="shrink-0">Rung {{rIndex+1}} <span v-if="rung.kind==='script'" class="text-purple-300">[AS]</span> —</span>
+                <input v-if="editingCommentId===rung.id"
+                  v-model="rung.comment"
+                  @focus="captureEditSnapshot"
+                  @change="commitEditSnapshot('Comment changed')"
+                  @keydown.enter.prevent="editingCommentId=null"
+                  @keydown.esc.prevent="editingCommentId=null"
+                  @blur="editingCommentId=null"
+                  class="flex-1 min-w-[220px] px-2 py-1 rounded bg-slate-950 border border-cyan-300/45 text-slate-100 outline-none focus:border-cyan-300"
+                  placeholder="Rung comment"
+                  autofocus />
+                <span v-else class="truncate">{{rung.comment || 'No comment'}}</span>
+              </div>
+              <button @click="startEditComment(rung)" class="text-xs px-2 py-1 rounded bg-slate-800 border border-slate-700">{{editingCommentId===rung.id ? 'Done' : 'Comment'}}</button>
+              <button v-if="rung.kind!=='script'" @click="mode='branch'; branchStart=null; show('Click start wire node')" class="text-xs px-2 py-1 rounded bg-blue-500/10 border border-blue-300/40 text-blue-200">Branch Tool</button>
+              <button @click="insertRungBefore(rIndex)" title="Insert a new ladder rung before this rung" class="text-xs px-2 py-1 rounded bg-cyan-500/10 border border-cyan-300/35 text-cyan-200">+ Before</button>
+              <button @click="insertRungAfter(rIndex)" title="Insert a new ladder rung after this rung" class="text-xs px-2 py-1 rounded bg-cyan-500/10 border border-cyan-300/35 text-cyan-200">+ After</button>
+              <button @click="insertScriptRungAfter(rIndex)" title="Insert a new AngelScript rung after this rung" class="text-xs px-2 py-1 rounded bg-purple-500/10 border border-purple-300/35 text-purple-200">+ AS After</button>
+              <button @click="duplicateRung(rIndex)" class="text-xs px-2 py-1 rounded bg-emerald-500/10 border border-emerald-300/35 text-emerald-200">Duplicate</button>
+              <button @click="moveRung(rIndex,-1)" :disabled="rIndex===0" title="Move rung up one position" class="text-xs px-2 py-1 rounded bg-slate-800 border border-slate-700 disabled:opacity-35">↑</button>
+              <button @click="moveRung(rIndex,1)" :disabled="rIndex===project.rungs.length-1" title="Move rung down one position" class="text-xs px-2 py-1 rounded bg-slate-800 border border-slate-700 disabled:opacity-35">↓</button>
+              <button @click="removeRung(rIndex)" class="text-xs px-2 py-1 rounded bg-red-500/10 border border-red-300/40 text-red-200">Delete Rung</button>
+            </div>
+
+            <div v-if="rung.kind==='script'" class="rounded-xl border border-purple-300/25 bg-slate-950/70 p-3">
+              <div class="flex items-center justify-between mb-2">
+                <div class="text-xs text-purple-200 font-semibold">AngelScript rung body</div>
+                <div class="text-xs text-slate-500">Inserted verbatim inside <span class="mono">scan()</span></div>
+              </div>
+              <textarea v-model="rung.code"
+                @focus="captureEditSnapshot"
+                @change="commitEditSnapshot('AngelScript rung changed')"
+                spellcheck="false"
+                class="mono w-full min-h-[150px] p-3 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 outline-none focus:border-purple-300 resize-y scrollbar"
+                placeholder="// Example:
+// Q0 = I0 && !I1;
+"></textarea>
+            </div>
+
+            <svg v-else :viewBox="'0 0 '+canvasW+' '+rungHeight(rung)" preserveAspectRatio="xMinYMin meet"
+                 class="w-full rounded-xl border border-slate-800 bg-slate-950/65"
+                 :style="{height: rungHeight(rung) + 'px'}"
+                 @mouseenter="hoverRungId=rung.id" @mouseleave="hoverRungId=null">
+
+              <!-- left and right power rails -->
+              <line :x1="railLeft" y1="24" :x2="railLeft" :y2="rungHeight(rung)-24" stroke="#e2e8f0" stroke-width="3"/>
+              <line :x1="railRight" y1="24" :x2="railRight" :y2="rungHeight(rung)-24" stroke="#e2e8f0" stroke-width="3"/>
+
+              <!-- rail connection stubs -->
+              <line :x1="railLeft" :y1="mainY" :x2="nodeX(0)" :y2="mainY" :stroke="simNodeOn(rung,0) ? '#34d399' : '#94a3b8'" stroke-width="3" :opacity="simNodeOn(rung,0) ? 1 : .88"/>
+              <line :x1="nodeX(8)" :y1="mainY" :x2="railRight" :y2="mainY" :stroke="simNodeOn(rung,8) ? '#34d399' : '#94a3b8'" stroke-width="3" :opacity="simNodeOn(rung,8) ? 1 : .88"/>
+
+              <!-- main wire segments. These are between wire nodes. -->
+              <g>
+                <line v-for="seg in mainSegments" :key="'seg'+seg"
+                  :x1="nodeX(seg)" :y1="mainY" :x2="nodeX(seg+1)" :y2="mainY"
+                   :stroke="simMainSegmentOn(rung,seg) ? '#34d399' : '#94a3b8'" stroke-width="3" :opacity="simMainSegmentOn(rung,seg) ? 1 : .88"/>
+              </g>
+
+              <!-- rail junction dots -->
+              <circle :cx="railLeft" :cy="mainY" r="4" fill="#cbd5e1"/>
+              <circle :cx="railRight" :cy="mainY" r="4" fill="#cbd5e1"/>
+
+              <!-- branch creation wire nodes on the main wire -->
+              <g>
+                <circle v-for="n in nodes" :key="'node'+n"
+                  :cx="nodeX(n)" :cy="mainY" :r="mode==='branch' ? 7 : 4"
+                  :fill="nodeFill(rung,n)" :stroke="mode==='branch' ? '#67e8f9' : '#cbd5e1'"
+                  :stroke-width="mode==='branch' ? 2.2 : 1.2"
+                  @click.stop="wireNodeClick(rung,n)"
+                  class="cursor-pointer"/>
+              </g>
+
+              <!-- main instruction slots -->
+              <g v-for="slot in slots" :key="'mainSlot'+slot">
+                <rect :x="slotCenterX(slot)-30" :y="mainY-28" width="60" height="56" rx="10"
+                  :fill="simElementFill(rung,'main',null,slot)"
+                  :stroke="simElementStroke(rung,'main',null,slot)"
+                  :opacity="rung.main[slot] ? 1 : (hoverRungId===rung.id && mode!=='branch' ? .32 : .045)"
+                  stroke-width="1.5"
+                  @dragover.prevent
+                  @drop="dropOnMain(rung,slot)"
+                  @click.stop="slotClick(rung,'main',null,slot)"
+                  class="cursor-pointer"/>
+                <text v-if="!rung.main[slot]" :x="slotCenterX(slot)" :y="mainY+4" fill="#64748b" font-size="14" text-anchor="middle"
+                  :opacity="hoverRungId===rung.id && mode!=='branch' ? .75 : .06">+</text>
+                <g v-if="rung.main[slot]" @click.stop="symbolClick(rung,'main',null,slot)">
+                  <symbol-render :el="rung.main[slot]" :x="slotCenterX(slot)" :y="mainY" :sim="simBlockFor(rung.main[slot])"></symbol-render>
+                </g>
+              </g>
+
+              <!-- branches -->
+              <g v-for="(br, bi) in rung.branches" :key="br.id">
+                <!-- vertical drops -->
+                <line :x1="nodeX(br.start)" :y1="mainY" :x2="nodeX(br.start)" :y2="branchY(rung,br)" :stroke="simBranchOn(rung,br) ? '#34d399' : '#94a3b8'" stroke-width="3" :opacity="simBranchOn(rung,br) ? 1 : .88"/>
+                <line :x1="nodeX(br.end)" :y1="mainY" :x2="nodeX(br.end)" :y2="branchY(rung,br)" :stroke="simBranchOn(rung,br) ? '#34d399' : '#94a3b8'" stroke-width="3" :opacity="simBranchOn(rung,br) ? 1 : .88"/>
+
+                <!-- optional branch rail stubs when branch starts/ends at outer wire nodes -->
+                <line v-if="br.start===0" :x1="railLeft" :y1="branchY(rung,br)" :x2="nodeX(0)" :y2="branchY(rung,br)" :stroke="simBranchOn(rung,br) ? '#34d399' : '#94a3b8'" stroke-width="3" :opacity="simBranchOn(rung,br) ? 1 : .88"/>
+                <line v-if="br.end===8" :x1="nodeX(8)" :y1="branchY(rung,br)" :x2="railRight" :y2="branchY(rung,br)" :stroke="simBranchOn(rung,br) ? '#34d399' : '#94a3b8'" stroke-width="3" :opacity="simBranchOn(rung,br) ? 1 : .88"/>
+
+                <!-- branch wire only between start and end nodes -->
+                <line :x1="nodeX(br.start)" :y1="branchY(rung,br)" :x2="nodeX(br.end)" :y2="branchY(rung,br)"
+                  :stroke="selectedBranch && selectedBranch.branchId===br.id ? '#67e8f9' : (simBranchOn(rung,br) ? '#34d399' : '#94a3b8')"
+                  stroke-width="3" :opacity="simBranchOn(rung,br) ? 1 : .92"/>
+
+                <!-- fat transparent hit wire for branch selection/deletion -->
+                <line :x1="nodeX(br.start)" :y1="branchY(rung,br)" :x2="nodeX(br.end)" :y2="branchY(rung,br)"
+                  stroke="transparent" stroke-width="20"
+                  @click.stop="branchClick(rung, br.id)"
+                  class="cursor-pointer"/>
+
+                <!-- junction dots -->
+                <circle :cx="nodeX(br.start)" :cy="mainY" r="5" fill="#cbd5e1"/>
+                <circle :cx="nodeX(br.end)" :cy="mainY" r="5" fill="#cbd5e1"/>
+                <circle :cx="nodeX(br.start)" :cy="branchY(rung,br)" r="4" fill="#cbd5e1"/>
+                <circle :cx="nodeX(br.end)" :cy="branchY(rung,br)" r="4" fill="#cbd5e1"/>
+
+                <!-- branch creation wire nodes on existing branch wires -->
+                <g v-if="mode==='branch'">
+                  <circle v-for="n in branchNodes(br)" :key="br.id+'branchNode'+n"
+                    :cx="nodeX(n)" :cy="branchY(rung,br)" r="7"
+                    :fill="nodeFill(rung,n)" stroke="#67e8f9" stroke-width="2.2"
+                    @click.stop="wireNodeClick(rung,n)"
+                    class="cursor-pointer"/>
+                </g>
+
+                <!-- branch delete button visible near branch start -->
+                <rect :x="nodeX(br.start)-38" :y="branchY(rung,br)-13" width="26" height="26" rx="7"
+                  fill="rgba(239,68,68,.20)" stroke="rgba(252,165,165,.75)"
+                  @click.stop="deleteBranch(rung,br.id)" class="cursor-pointer"/>
+                <text :x="nodeX(br.start)-25" :y="branchY(rung,br)+6" text-anchor="middle" fill="#fecaca" font-size="17" font-weight="900" pointer-events="none">×</text>
+
+                <!-- branch instruction slots: positions wrapped by start/end wire nodes -->
+                <g v-for="slot in branchSlots(br)" :key="br.id+'slot'+slot">
+                  <rect :x="slotCenterX(slot)-30" :y="branchY(rung,br)-28" width="60" height="56" rx="10"
+                    :fill="simElementFill(rung,'branch',br,slot)"
+                    :stroke="simElementStroke(rung,'branch',br,slot)"
+                    :opacity="br.cells[slot] ? 1 : (hoverRungId===rung.id && mode!=='branch' ? .32 : .045)"
+                    stroke-width="1.5"
+                    @dragover.prevent
+                    @drop="dropOnBranch(rung,br,slot)"
+                    @click.stop="slotClick(rung,'branch',br,slot)"
+                    class="cursor-pointer"/>
+                  <text v-if="!br.cells[slot]" :x="slotCenterX(slot)" :y="branchY(rung,br)+4" fill="#64748b" font-size="14" text-anchor="middle"
+                    :opacity="hoverRungId===rung.id && mode!=='branch' ? .75 : .06">+</text>
+                  <g v-if="br.cells[slot]" @click.stop="symbolClick(rung,'branch',br,slot)">
+                    <symbol-render :el="br.cells[slot]" :x="slotCenterX(slot)" :y="branchY(rung,br)" :sim="simBlockFor(br.cells[slot])"></symbol-render>
+                  </g>
+                </g>
+              </g>
+            </svg>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <button @click="addRung" class="w-full py-4 rounded-xl border border-dashed border-blue-400/40 bg-blue-500/5 text-blue-200 hover:bg-blue-500/10 btn">
+              + Add Ladder Rung
+            </button>
+            <button @click="addScriptRung" class="w-full py-4 rounded-xl border border-dashed border-purple-400/40 bg-purple-500/5 text-purple-200 hover:bg-purple-500/10 btn">
+              + Add AngelScript Rung
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="px-4 py-2 border-t border-slate-800 flex gap-6 text-xs overflow-hidden">
+        <span><b class="text-emerald-300">Scan:</b> {{project.scan_ms}} ms</span>
+        <span><b>Rungs:</b> {{project.rungs.length}}</span>
+        <span><b>Branches:</b> {{branchCount()}}</span>
+        <span><b>Symbols:</b> {{allElements().length}}</span>
+        <span class="truncate"><b>Project:</b> <span class="text-cyan-300">{{project.name}}</span></span>
+      </div>
+    </section>
+
+    <aside class="flex flex-col gap-3 min-h-0 overflow-hidden">
+      <section class="glass rounded-2xl overflow-hidden shrink-0" :class="panelOpen('inspector') ? 'min-h-[160px] max-h-[42vh] grid grid-rows-[auto_1fr]' : ''">
+        <button @click="togglePanel('inspector')" class="w-full px-4 py-2 border-b border-slate-800/70 flex justify-between items-center gap-2 text-left btn">
+          <h2 class="text-xs font-bold tracking-widest text-slate-400 uppercase">Inspector</h2>
+          <span class="mono text-xs text-slate-500">{{panelOpen('inspector') ? '−' : '+'}}</span>
+        </button>
+
+        <div v-show="panelOpen('inspector')" class="p-4 overflow-auto scrollbar min-h-0">
+          <div v-if="selected" class="space-y-3">
+            <div class="grid grid-cols-[92px_1fr] gap-2 items-center">
+              <label class="text-xs text-slate-400">Type</label>
+              <div class="mono text-cyan-300 text-xs px-2 py-1 rounded bg-slate-950 border border-slate-700">{{selected.el.type}}</div>
+
+              <label class="text-xs text-slate-400">Tag</label>
+              <input v-model="selected.el.tag" class="w-full min-w-0 px-2 py-1 rounded bg-slate-950 border border-slate-700 mono text-sm outline-none focus:border-cyan-400"/>
+
+              <label v-if="hasPreset(selected.el)" class="text-xs text-slate-400">Preset</label>
+              <input v-if="hasPreset(selected.el)" v-model.number="selected.el.preset" type="number" class="w-full min-w-0 px-2 py-1 rounded bg-slate-950 border border-slate-700 mono text-sm outline-none focus:border-cyan-400"/>
+
+              <label v-if="isCounter(selected.el)" class="text-xs text-slate-400">Reset Expr</label>
+              <input v-if="isCounter(selected.el)" v-model="selected.el.resetTag" placeholder="ResetPB || !AutoMode" class="w-full min-w-0 px-2 py-1 rounded bg-slate-950 border border-slate-700 mono text-sm outline-none focus:border-cyan-400"/>
+            </div>
+
+            <div class="pt-2 border-t border-slate-800/80 text-[11px] text-slate-500 leading-relaxed">
+              Future symbol options can be added here without pushing into the output panels. This inspector area scrolls independently.
+            </div>
+          </div>
+
+          <div v-else-if="selectedBranch" class="space-y-3">
+            <div class="text-sm text-cyan-200">Branch selected.</div>
+            <div class="text-xs text-slate-400">Use Delete Selected Branch or the branch × button on the canvas.</div>
+          </div>
+
+          <p v-else class="text-sm text-slate-500">Select a symbol or branch.</p>
+        </div>
+      </section>
+
+      <section class="glass rounded-2xl overflow-hidden shrink-0" :class="panelOpen('validation') ? 'min-h-[120px] max-h-[34vh] grid grid-rows-[auto_1fr]' : ''">
+        <button @click="togglePanel('validation')" class="w-full px-4 py-2 border-b border-slate-800 flex justify-between items-center gap-2 text-left btn">
+          <h2 class="font-bold">Validation</h2>
+          <div class="flex items-center gap-2 text-xs shrink-0">
+            <span class="px-2 py-1 rounded border" :class="validationSummary.errors ? 'bg-red-500/15 border-red-300/40 text-red-200' : 'bg-emerald-500/10 border-emerald-300/35 text-emerald-200'">{{validationSummary.errors}} errors</span>
+            <span class="px-2 py-1 rounded border" :class="validationSummary.warnings ? 'bg-amber-500/15 border-amber-300/40 text-amber-200' : 'bg-slate-800 border-slate-700 text-slate-400'">{{validationSummary.warnings}} warnings</span>
+            <span class="mono text-xs text-slate-500">{{panelOpen('validation') ? '−' : '+'}}</span>
+          </div>
+        </button>
+        <div v-show="panelOpen('validation')" class="overflow-auto scrollbar p-3 bg-slate-950/55">
+          <div v-if="validationIssues.length===0" class="h-full min-h-[90px] flex items-center justify-center text-center text-sm text-emerald-200">
+            No validation issues found.
+          </div>
+          <div v-else class="space-y-2">
+            <div v-for="issue in validationIssues" :key="issue.id" class="rounded-xl border p-3" :class="issueClass(issue.level)">
+              <div class="flex items-start justify-between gap-2">
+                <div class="min-w-0">
+                  <div class="text-sm font-semibold leading-tight">{{issue.title}}</div>
+                  <div class="text-xs text-slate-400 mt-1">{{issue.where}}</div>
+                </div>
+                <span class="mono text-[10px] px-2 py-0.5 rounded border shrink-0" :class="issueBadgeClass(issue.level)">{{issue.level}}</span>
+              </div>
+              <div class="text-xs text-slate-300 mt-2 leading-relaxed">{{issue.message}}</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="glass rounded-2xl overflow-hidden" :class="panelOpen('simulator') ? 'flex-1 min-h-[260px] grid grid-rows-[auto_1fr]' : 'shrink-0'">
+        <div class="px-4 py-2 border-b border-slate-800 flex justify-between items-center gap-2">
+          <button @click="togglePanel('simulator')" class="flex items-center gap-2 text-left btn min-w-0">
+            <h2 class="font-bold">Simulator</h2>
+            <span class="mono text-xs text-slate-500">{{panelOpen('simulator') ? '−' : '+'}}</span>
+          </button>
+          <div class="flex items-center gap-2 shrink-0">
+            <button @click="simStep" class="btn px-2 py-1 rounded-lg bg-slate-800 border border-slate-600 text-xs">Scan</button>
+            <button @click="toggleSimRun" class="btn px-2 py-1 rounded-lg border text-xs" :class="simRunning ? 'bg-red-500/15 border-red-300/35 text-red-200' : 'bg-emerald-500/10 border-emerald-300/35 text-emerald-200'">{{simRunning ? 'Stop' : 'Run'}}</button>
+            <button @click="simReset" class="btn px-2 py-1 rounded-lg bg-slate-800 border border-slate-600 text-xs">Reset</button>
+          </div>
+        </div>
+        <div v-show="panelOpen('simulator')" class="overflow-auto scrollbar p-3 bg-slate-950/55 space-y-3">
+          <div class="flex items-center justify-between text-xs text-slate-400">
+            <span><b class="text-emerald-300">Scans:</b> {{simScanCount}}</span>
+            <span><b>Rate:</b> {{project.scan_ms || 5}} ms</span>
+            <span><b>Tags:</b> {{simTagList.length}}</span>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <button v-for="tag in simTagList" :key="tag" @click="toggleSimTag(tag)"
+              class="px-2 py-1.5 rounded-lg border text-left mono text-xs truncate"
+              :class="simTagValue(tag) ? 'bg-emerald-500/15 border-emerald-300/45 text-emerald-100' : 'bg-slate-900 border-slate-700 text-slate-400'">
+              <span class="inline-block w-2 h-2 rounded-full mr-1" :class="simTagValue(tag) ? 'bg-emerald-300' : 'bg-slate-600'"></span>{{tag}}
+            </button>
+          </div>
+          <div v-if="simBlockList.length" class="pt-2 border-t border-slate-800">
+            <div class="text-xs font-bold tracking-widest text-slate-500 uppercase mb-2">Blocks</div>
+            <div class="space-y-1">
+              <div v-for="b in simBlockList" :key="b.tag" class="flex justify-between gap-2 mono text-xs text-slate-300">
+                <span class="truncate">{{b.tag}}</span>
+                <span class="text-slate-500 shrink-0">{{b.text}}</span>
+              </div>
+            </div>
+          </div>
+          <div class="text-[11px] text-slate-500 leading-relaxed">
+            Live mode evaluates the ladder JSON directly in the browser. <span class="text-emerald-300">Green</span> means energized power flow; <span class="text-amber-300">amber</span> means the contact/block condition is true but upstream power is not present. Timers show ET/remaining time; counters show CV. Counter reset supports tags plus !, &&, ||, and parentheses. Script rungs are simulated only for simple boolean assignments such as <span class="mono">Q0 = I0 && !I1;</span>.
+          </div>
+        </div>
+      </section>
+
+      <section class="glass rounded-2xl overflow-hidden" :class="panelOpen('script') ? 'flex-1 min-h-[220px] grid grid-rows-[auto_1fr]' : 'shrink-0'">
+        <div class="px-4 py-2 border-b border-slate-800 flex justify-between items-center gap-2">
+          <button @click="togglePanel('script')" class="flex items-center gap-2 text-left btn min-w-0">
+            <h2 class="font-bold">AngelScript Output</h2>
+            <span class="mono text-xs text-slate-500">{{panelOpen('script') ? '−' : '+'}}</span>
+          </button>
+          <button @click="copy(transpile())" class="btn px-3 py-1 rounded-lg bg-cyan-500/10 border border-cyan-300/35 text-cyan-200 text-xs shrink-0">Copy</button>
+        </div>
+        <pre v-show="panelOpen('script')" class="mono text-xs text-slate-300 overflow-auto scrollbar p-4 bg-slate-950/70">{{transpile()}}</pre>
+      </section>
+
+      <section class="glass rounded-2xl overflow-hidden" :class="panelOpen('json') ? 'flex-1 min-h-[220px] grid grid-rows-[auto_1fr]' : 'shrink-0'">
+        <div class="px-4 py-2 border-b border-slate-800 flex justify-between items-center gap-2">
+          <button @click="togglePanel('json')" class="flex items-center gap-2 text-left btn min-w-0">
+            <h2 class="font-bold">JSON Model</h2>
+            <span class="mono text-xs text-slate-500">{{panelOpen('json') ? '−' : '+'}}</span>
+          </button>
+          <button @click="copy(jsonModel)" class="btn px-3 py-1 rounded-lg bg-slate-800 border border-slate-600 text-xs shrink-0">Copy</button>
+        </div>
+        <textarea v-show="panelOpen('json')" v-model="jsonDraft" @change="applyJson" class="mono text-xs text-slate-300 overflow-auto scrollbar p-4 bg-slate-950/70 outline-none resize-none"></textarea>
+      </section>
+    </aside>
+  </main>
+
+  <div v-if="toast" class="fixed bottom-4 right-4 glass rounded-xl px-4 py-3 text-cyan-100 border-cyan-300/30">{{toast}}</div>
+</div>
+
+<script>
+const { createApp } = Vue;
+
+const SymbolRender = {
+  props:['el','x','y','sim'],
+  template: `
+  <g class="cursor-pointer">
+    <template v-if="el.type==='NO'">
+      <line :x1="x-30" :y1="y" :x2="x-15" :y2="y" stroke="#e2e8f0" stroke-width="2"/>
+      <line :x1="x+15" :y1="y" :x2="x+30" :y2="y" stroke="#e2e8f0" stroke-width="2"/>
+      <line :x1="x-15" :y1="y-20" :x2="x-15" :y2="y+20" stroke="#67e8f9" stroke-width="3"/>
+      <line :x1="x+15" :y1="y-20" :x2="x+15" :y2="y+20" stroke="#67e8f9" stroke-width="3"/>
+    </template>
+    <template v-else-if="el.type==='NC'">
+      <line :x1="x-30" :y1="y" :x2="x-15" :y2="y" stroke="#e2e8f0" stroke-width="2"/>
+      <line :x1="x+15" :y1="y" :x2="x+30" :y2="y" stroke="#e2e8f0" stroke-width="2"/>
+      <line :x1="x-15" :y1="y-20" :x2="x-15" :y2="y+20" stroke="#fca5a5" stroke-width="3"/>
+      <line :x1="x+15" :y1="y-20" :x2="x+15" :y2="y+20" stroke="#fca5a5" stroke-width="3"/>
+      <line :x1="x-22" :y1="y+20" :x2="x+22" :y2="y-20" stroke="#fca5a5" stroke-width="2"/>
+    </template>
+    <template v-else-if="el.type==='OUT'">
+      <line :x1="x-34" :y1="y" :x2="x-25" :y2="y" stroke="#e2e8f0" stroke-width="2"/>
+      <line :x1="x+25" :y1="y" :x2="x+34" :y2="y" stroke="#e2e8f0" stroke-width="2"/>
+      <path :d="'M '+(x-24)+' '+(y-21)+' Q '+(x-8)+' '+y+' '+(x-24)+' '+(y+21)" fill="none" stroke="#86efac" stroke-width="3"/>
+      <path :d="'M '+(x+24)+' '+(y-21)+' Q '+(x+8)+' '+y+' '+(x+24)+' '+(y+21)" fill="none" stroke="#86efac" stroke-width="3"/>
+    </template>
+    <template v-else>
+      <rect :x="x-31" :y="y-24" width="62" height="48" rx="8" fill="#0f172a" :stroke="blockColor(el.type)" stroke-width="2"/>
+      <text :x="x" :y="y-4" text-anchor="middle" :fill="blockColor(el.type)" font-size="13" font-weight="800">{{el.type}}</text>
+      <text :x="x" :y="y+9" text-anchor="middle" fill="#94a3b8" font-size="9">{{presetLabel(el)}}</text>
+      <text v-if="sim" :x="x" :y="y+21" text-anchor="middle" :fill="sim.output ? '#86efac' : '#cbd5e1'" font-size="9" class="mono">{{simLabel(sim)}}</text>
+    </template>
+    <text :x="x" :y="y+41" text-anchor="middle" fill="#dbeafe" font-size="11" class="mono">{{el.tag}}</text>
+  </g>`,
+  methods:{
+    blockColor(t){ return (t==='TON'||t==='TOF') ? '#fbbf24' : '#c084fc'; },
+    presetLabel(el){ return (el.type==='TON'||el.type==='TOF') ? ((el.preset||1000)+'ms') : ('PV '+(el.preset||10)); },
+    simLabel(sim){
+      if(!sim) return '';
+      if(sim.type==='TON') return 'Q='+ (sim.output?'1':'0') +' ET='+Math.round(sim.elapsed_ms||0);
+      if(sim.type==='TOF') return 'Q='+ (sim.output?'1':'0') +' ET='+Math.round(sim.elapsed_ms||0)+' R='+Math.round(sim.remaining_ms||0);
+      return 'Q='+ (sim.output?'1':'0') +' CV='+Math.round(sim.count||0);
+    }
+  }
+};
+
+createApp({
+  components:{SymbolRender},
+  data(){
+    return {
+      canvasW: 820,
+      railLeft: 52,
+      railRight: 780,
+      mainY: 72,
+      nodeStartX: 92,
+      nodeStep: 82,
+      nodes:[0,1,2,3,4,5,6,7,8],
+      slots:[0,1,2,3,4,5,6,7],
+      mainSegments:[0,1,2,3,4,5,6,7],
+      selectedTool:'NO',
+      draggedTool:null,
+      mode:'select',
+      branchStart:null,
+      selected:null,
+      selectedBranch:null,
+      editingCommentId:null,
+      hoverRungId:null,
+      toast:'',
+      jsonDraft:'',
+      collapsedPanels:{ inspector:false, validation:false, simulator:false, script:true, json:true },
+      history:[],
+      editSnapshot:null,
+      maxHistory:60,
+      simRunning:false,
+      simTimer:null,
+      simTags:{},
+      simBlocks:{},
+      simRungs:{},
+      simScanCount:0,
+      project:{ name:'PiLab Ladder Project', scan_ms:5, rungs:[] },
+      tools:[
+        {type:'NO', label:'Normally Open', desc:'True when input/tag is true.', icon:'<svg width="48" height="32"><line x1="2" y1="16" x2="14" y2="16" stroke="#e2e8f0" stroke-width="2"/><line x1="34" y1="16" x2="46" y2="16" stroke="#e2e8f0" stroke-width="2"/><line x1="15" y1="4" x2="15" y2="28" stroke="#67e8f9" stroke-width="3"/><line x1="33" y1="4" x2="33" y2="28" stroke="#67e8f9" stroke-width="3"/></svg>'},
+        {type:'NC', label:'Normally Closed', desc:'True when input/tag is false.', icon:'<svg width="48" height="32"><line x1="2" y1="16" x2="14" y2="16" stroke="#e2e8f0" stroke-width="2"/><line x1="34" y1="16" x2="46" y2="16" stroke="#e2e8f0" stroke-width="2"/><line x1="15" y1="4" x2="15" y2="28" stroke="#fca5a5" stroke-width="3"/><line x1="33" y1="4" x2="33" y2="28" stroke="#fca5a5" stroke-width="3"/><line x1="9" y1="28" x2="39" y2="4" stroke="#fca5a5" stroke-width="2"/></svg>'},
+        {type:'OUT', label:'Output Coil', desc:'Writes rung result.', icon:'<svg width="48" height="32"><path d="M13 4 Q2 16 13 28" fill="none" stroke="#86efac" stroke-width="3"/><path d="M35 4 Q46 16 35 28" fill="none" stroke="#86efac" stroke-width="3"/></svg>'},
+        {type:'TON', label:'On Delay Timer', desc:'Timer on delay.', icon:'<svg width="48" height="32"><rect x="7" y="4" width="34" height="24" rx="5" fill="#0f172a" stroke="#fbbf24" stroke-width="2"/><text x="24" y="20" text-anchor="middle" fill="#fde68a" font-size="10" font-weight="700">TON</text></svg>'},
+        {type:'TOF', label:'Off Delay Timer', desc:'Timer off delay.', icon:'<svg width="48" height="32"><rect x="7" y="4" width="34" height="24" rx="5" fill="#0f172a" stroke="#fbbf24" stroke-width="2"/><text x="24" y="20" text-anchor="middle" fill="#fde68a" font-size="10" font-weight="700">TOF</text></svg>'},
+        {type:'CTU', label:'Up Counter', desc:'Counts up.', icon:'<svg width="48" height="32"><rect x="7" y="4" width="34" height="24" rx="5" fill="#0f172a" stroke="#c084fc" stroke-width="2"/><text x="24" y="20" text-anchor="middle" fill="#e9d5ff" font-size="10" font-weight="700">CTU</text></svg>'},
+        {type:'CTD', label:'Down Counter', desc:'Counts down.', icon:'<svg width="48" height="32"><rect x="7" y="4" width="34" height="24" rx="5" fill="#0f172a" stroke="#c084fc" stroke-width="2"/><text x="24" y="20" text-anchor="middle" fill="#e9d5ff" font-size="10" font-weight="700">CTD</text></svg>'}
+      ]
+    };
+  },
+  computed:{
+    jsonModel(){ return JSON.stringify(this.project,null,2); },
+    validationIssues(){ return this.validateProject(); },
+    validationSummary(){
+      const issues=this.validationIssues;
+      return {
+        errors: issues.filter(i=>i.level==='error').length,
+        warnings: issues.filter(i=>i.level==='warning').length,
+        info: issues.filter(i=>i.level==='info').length
+      };
+    },
+    simTagList(){
+      const tags=new Set();
+      for(const e of this.allElements()){
+        if(e && e.tag) tags.add(this.sanitize(e.tag));
+        if(e && e.resetTag) for(const t of this.expressionTags(e.resetTag)) tags.add(t);
+      }
+      for(const k of Object.keys(this.simTags||{})) tags.add(k);
+      return [...tags].filter(t => !this.simBlocks[t]).sort();
+    },
+    simBlockList(){
+      return Object.keys(this.simBlocks||{}).sort().map(tag=>{
+        const b=this.simBlocks[tag];
+        if(!b) return {tag,text:''};
+        if(b.type==='TON') return {tag,text:`TON Q=${b.output?'1':'0'} ET=${Math.round(b.elapsed_ms||0)}/${b.preset_ms||0}ms`};
+        if(b.type==='TOF') return {tag,text:`TOF Q=${b.output?'1':'0'} ET=${Math.round(b.elapsed_ms||0)}/${b.preset_ms||0}ms REM=${Math.round(b.remaining_ms||0)}ms`};
+        return {tag,text:`${b.type} Q=${b.output?'1':'0'} CV=${b.count||0}/${b.preset||0}${b.resetExpr?' R='+b.resetExpr:''}`};
+      });
+    }
+  },
+  mounted(){ this.sampleProject(); },
+  watch:{ project:{ deep:true, handler(){ this.jsonDraft=this.jsonModel; }}},
+  methods:{
+    uid(){ return Math.random().toString(16).slice(2,10); },
+    show(m){ this.toast=m; setTimeout(()=>this.toast='',1500); },
+    panelOpen(name){ return !this.collapsedPanels[name]; },
+    togglePanel(name){ this.collapsedPanels[name] = !this.collapsedPanels[name]; },
+    cloneProject(){ return JSON.parse(JSON.stringify(this.project)); },
+    pushHistory(label='Edit'){
+      if(!this.project) return;
+      const snap=JSON.stringify(this.project);
+      if(this.history.length && this.history[this.history.length-1].snapshot===snap) return;
+      this.history.push({label, snapshot:snap});
+      if(this.history.length>this.maxHistory) this.history.shift();
+    },
+    undo(){
+      const item=this.history.pop();
+      if(!item) return this.show('Nothing to undo');
+      this.project=JSON.parse(item.snapshot);
+      this.selected=null; this.selectedBranch=null; this.branchStart=null; this.editingCommentId=null; this.editSnapshot=null;
+      this.show('Undid: '+item.label);
+    },
+    captureEditSnapshot(){ if(!this.editSnapshot) this.editSnapshot=JSON.stringify(this.project); },
+    commitEditSnapshot(label='Edit'){
+      if(this.editSnapshot && this.editSnapshot!==JSON.stringify(this.project)){
+        this.history.push({label, snapshot:this.editSnapshot});
+        if(this.history.length>this.maxHistory) this.history.shift();
+      }
+      this.editSnapshot=null;
+    },
+    withHistory(label, fn){ this.pushHistory(label); fn(); },
+    issueClass(level){
+      if(level==='error') return 'bg-red-500/10 border-red-300/35';
+      if(level==='warning') return 'bg-amber-500/10 border-amber-300/35';
+      return 'bg-blue-500/10 border-blue-300/30';
+    },
+    issueBadgeClass(level){
+      if(level==='error') return 'bg-red-500/15 border-red-300/40 text-red-200';
+      if(level==='warning') return 'bg-amber-500/15 border-amber-300/40 text-amber-200';
+      return 'bg-blue-500/15 border-blue-300/40 text-blue-200';
+    },
+    simEnsureBlock(e){
+      if(!e || !['TON','TOF','CTU','CTD'].includes(e.type)) return null;
+      const tag=this.sanitize(e.tag);
+      const preset=Number(e.preset || (e.type==='TON'||e.type==='TOF' ? 1000 : 10));
+      let b=this.simBlocks[tag];
+      if(!b || b.type!==e.type){
+        b={type:e.type, preset_ms:preset, preset:preset, elapsed_ms:0, remaining_ms:0, count:e.type==='CTD'?preset:0, last:false, input:false, output:false, resetExpr:String(e.resetTag||'').trim()};
+        if(e.type==='CTD') b.output = b.count===0;
+        this.simBlocks[tag]=b;
+      }
+      b.preset_ms=preset;
+      b.preset=preset;
+      b.resetExpr=String(e.resetTag||'').trim();
+      if(e.type==='TOF') b.remaining_ms = b.output && !b.input ? Math.max(0, (b.preset_ms||0) - (b.elapsed_ms||0)) : 0;
+      return b;
+    },
+    simBlockFor(e){
+      if(!e || !['TON','TOF','CTU','CTD'].includes(e.type)) return null;
+      return this.simEnsureBlock(e);
+    },
+    simTagValue(tag){
+      tag=this.sanitize(tag);
+      const b=this.simBlocks[tag];
+      if(b) return !!b.output;
+      return !!this.simTags[tag];
+    },
+    expressionTags(expr){
+      const out=[];
+      const reserved=new Set(['true','false']);
+      const text=String(expr||'');
+      const re=/\b[A-Za-z_][A-Za-z0-9_]*\b/g;
+      let m;
+      while((m=re.exec(text))){
+        if(!reserved.has(m[0])) out.push(this.sanitize(m[0]));
+      }
+      return [...new Set(out)];
+    },
+    normalizeBoolExpression(expr){
+      const text=String(expr||'').trim();
+      if(!text) return '';
+      // Keep this deliberately tiny: identifiers, true/false, !, &&, ||, parentheses, and whitespace.
+      // A reset expression is meant to be PLC-style Boolean logic, not arbitrary script.
+      if(!/^[A-Za-z0-9_!&|()\s]+$/.test(text)) return '';
+      return text.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g,(name)=>{
+        if(name==='true' || name==='false') return name;
+        return this.sanitize(name);
+      });
+    },
+    simEvalBoolExpression(expr){
+      const normalized=this.normalizeBoolExpression(expr);
+      if(!normalized) return false;
+      let js=normalized.replace(/\b[A-Za-z_][A-Za-z0-9_]*\b/g,(name)=>{
+        if(name==='true' || name==='false') return name;
+        return `this.simTagValue('${name}')`;
+      });
+      try{ return !!Function('return ('+js+');').call(this); }
+      catch(e){ return false; }
+    },
+    toggleSimTag(tag){
+      // Toggle an input/internal simulator tag and immediately perform one scan so
+      // wire/path highlighting updates at the same time as contact-state highlighting.
+      // This preserves two separate cues:
+      //   amber = contact/block condition is true
+      //   green = energized power flow through wires/elements
+      this.simTags[this.sanitize(tag)] = !this.simTagValue(tag);
+      this.simStep(false);
+    },
+    simReset(){
+      this.stopSimRun();
+      this.simTags={}; this.simBlocks={}; this.simRungs={}; this.simScanCount=0;
+      this.show('Simulator reset');
+      this.simStep(false);
+    },
+    toggleSimRun(){
+      if(this.simRunning) return this.stopSimRun();
+      this.simRunning=true;
+      const run=()=>{ this.simStep(false); };
+      run();
+      this.simTimer=setInterval(run, Math.max(20, Number(this.project.scan_ms||5)));
+    },
+    stopSimRun(){ if(this.simTimer) clearInterval(this.simTimer); this.simTimer=null; this.simRunning=false; },
+    simEvalElement(e){
+      if(!e) return true;
+      const tag=this.sanitize(e.tag);
+      if(e.type==='NO') return this.simTagValue(tag);
+      if(e.type==='NC') return !this.simTagValue(tag);
+      if(['TON','TOF','CTU','CTD'].includes(e.type)) return this.simTagValue(tag);
+      return true;
+    },
+    simEvalSeries(cells,start=0,end=8){
+      for(let i=start;i<end;i++){
+        const e=(cells||[])[i];
+        if(!e || e.type==='OUT') continue;
+        if(!this.simEvalElement(e)) return false;
+      }
+      return true;
+    },
+    simEvaluateRungFlow(r){
+      const nodes=Array(9).fill(false); nodes[0]=true;
+      const main=Array(8).fill(false);
+      const branch={};
+      for(let pass=0; pass<12; pass++){
+        let changed=false;
+        for(let i=0;i<8;i++){
+          const on=nodes[i] && this.simEvalElement((r.main||[])[i]);
+          if(on){ main[i]=true; if(!nodes[i+1]){ nodes[i+1]=true; changed=true; } }
+        }
+        for(const br of (r.branches||[])){
+          if(!br || br.end<=br.start || br.start<0 || br.end>8) continue;
+          const on=nodes[br.start] && this.simEvalSeries(br.cells||[],br.start,br.end);
+          if(on){ branch[br.id]=true; if(!nodes[br.end]){ nodes[br.end]=true; changed=true; } }
+        }
+        if(!changed) break;
+      }
+      return {nodes, main, branch, output:!!nodes[8]};
+    },
+    simInputToMainSlot(r,slot){ return this.simEvaluateRungFlowToNode(r, slot); },
+    simInputToBranchSlot(r,br,slot){ return this.simEvaluateRungFlowToNode(r, br.start) && this.simEvalSeries(br.cells||[], br.start, slot); },
+    simEvaluateRungFlowToNode(r,target){
+      const nodes=Array(9).fill(false); nodes[0]=true;
+      for(let pass=0; pass<12; pass++){
+        let changed=false;
+        for(let i=0;i<Math.min(8,target);i++){
+          const on=nodes[i] && this.simEvalElement((r.main||[])[i]);
+          if(on && i+1<=target && !nodes[i+1]){ nodes[i+1]=true; changed=true; }
+        }
+        for(const br of (r.branches||[])){
+          if(!br || br.end<=br.start || br.start<0 || br.end>target) continue;
+          const on=nodes[br.start] && this.simEvalSeries(br.cells||[],br.start,br.end);
+          if(on && !nodes[br.end]){ nodes[br.end]=true; changed=true; }
+        }
+        if(!changed) break;
+      }
+      return !!nodes[target];
+    },
+    simUpdateBlock(e,input){
+      const b=this.simEnsureBlock(e); if(!b) return;
+      const scan=Number(this.project.scan_ms||5);
+      const reset = e.resetTag ? this.simEvalBoolExpression(e.resetTag) : false;
+      b.input=!!input;
+      if(e.type==='TON'){
+        if(input){ b.elapsed_ms=Math.min((b.elapsed_ms||0)+scan,b.preset_ms||0); b.output=b.elapsed_ms >= (b.preset_ms||0); }
+        else { b.elapsed_ms=0; b.output=false; }
+        b.remaining_ms=Math.max(0,(b.preset_ms||0)-(b.elapsed_ms||0));
+      } else if(e.type==='TOF'){
+        // IEC-style off-delay:
+        // IN true  -> Q true immediately, ET reset to 0.
+        // IN false -> Q stays true while ET counts up to PT, then Q false.
+        if(input){
+          b.output=true;
+          b.elapsed_ms=0;
+          b.remaining_ms=0;
+        } else if(b.output){
+          b.elapsed_ms=Math.min((b.elapsed_ms||0)+scan,b.preset_ms||0);
+          b.remaining_ms=Math.max(0,(b.preset_ms||0)-(b.elapsed_ms||0));
+          if(b.elapsed_ms >= (b.preset_ms||0)){
+            b.output=false;
+            b.elapsed_ms=b.preset_ms||0;
+            b.remaining_ms=0;
+          }
+        } else {
+          b.elapsed_ms=b.preset_ms||0;
+          b.remaining_ms=0;
+        }
+      } else if(e.type==='CTU'){
+        if(reset){ b.count=0; b.output=false; b.last=!!input; return; }
+        if(input && !b.last) b.count=(b.count||0)+1;
+        b.last=!!input; b.output=(b.count||0) >= (b.preset||0);
+      } else if(e.type==='CTD'){
+        if(reset){ b.count=b.preset||0; b.output=false; b.last=!!input; return; }
+        if(input && !b.last && (b.count||0)>0) b.count--;
+        b.last=!!input; b.output=(b.count||0)===0;
+      }
+    },
+    simApplyScriptRung(r){
+      // Safe mini-simulator for simple boolean AngelScript assignment lines.
+      // It intentionally does not eval arbitrary user code.
+      const code=String(r.code||'');
+      for(const raw of code.split('\n')){
+        const line=raw.replace(/\/\/.*$/,'').trim();
+        const m=line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+);$/);
+        if(!m) continue;
+        const target=this.sanitize(m[1]);
+        const expr=m[2];
+        if(!/^[A-Za-z0-9_!&|()\s.]+$/.test(expr)) continue;
+        let js=expr.replace(/\b([A-Za-z_][A-Za-z0-9_]*)(\.Q\(\))?\b/g,(all,name,q)=>`this.simTagValue('${this.sanitize(name)}')`);
+        try{ this.simTags[target]=!!Function('return ('+js+');').call(this); } catch(e){}
+      }
+    },
+    simStep(showToast=true){
+      // Ensure blocks exist before evaluating, then update each rung in scan order.
+      for(const e of this.allElements()) this.simEnsureBlock(e);
+      const rungStates={};
+      for(const r of (this.project.rungs||[])){
+        if(r.kind==='script') { this.simApplyScriptRung(r); continue; }
+        // Update function blocks from the power reaching their input side.
+        for(let slot=0; slot<(r.main||[]).length; slot++){
+          const e=r.main[slot];
+          if(e && ['TON','TOF','CTU','CTD'].includes(e.type)) this.simUpdateBlock(e, this.simInputToMainSlot(r,slot));
+        }
+        for(const br of (r.branches||[])){
+          for(let slot=br.start; slot<br.end; slot++){
+            const e=(br.cells||[])[slot];
+            if(e && ['TON','TOF','CTU','CTD'].includes(e.type)) this.simUpdateBlock(e, this.simInputToBranchSlot(r,br,slot));
+          }
+        }
+        const flow=this.simEvaluateRungFlow(r);
+        rungStates[r.id]=flow;
+        for(const o of this.outputs(r)) this.simTags[this.sanitize(o.tag)] = flow.output;
+      }
+      this.simRungs=rungStates;
+      this.simScanCount++;
+      if(showToast) this.show('Simulator scan complete');
+    },
+    simDisplayFlow(r){
+      // Prefer the last scanned state, but provide a live display fallback so newly
+      // imported/edited rungs do not appear to have dead wires before the first scan.
+      return (this.simRungs && this.simRungs[r.id]) ? this.simRungs[r.id] : this.simEvaluateRungFlow(r);
+    },
+    simNodeOn(r,n){ const f=this.simDisplayFlow(r); return !!(f && f.nodes && f.nodes[n]); },
+    simMainSegmentOn(r,seg){ const f=this.simDisplayFlow(r); return !!(f && f.main && f.main[seg]); },
+    simBranchOn(r,br){ const f=this.simDisplayFlow(r); return !!(f && f.branch && f.branch[br.id]); },
+    simElementObject(r,lane,br,slot){
+      if(lane==='main') return (r.main||[])[slot] || null;
+      return br ? ((br.cells||[])[slot] || null) : null;
+    },
+    simElementInputPower(r,lane,br,slot){
+      if(lane==='main') return this.simInputToMainSlot(r,slot);
+      return br ? this.simInputToBranchSlot(r,br,slot) : false;
+    },
+    simElementTrue(r,lane,br,slot){
+      const e=this.simElementObject(r,lane,br,slot);
+      return !!e && this.simEvalElement(e);
+    },
+    simElementPowered(r,lane,br,slot){
+      const e=this.simElementObject(r,lane,br,slot);
+      return !!e && this.simElementInputPower(r,lane,br,slot) && this.simEvalElement(e);
+    },
+    simElementFill(r,lane,br,slot){
+      const e=this.simElementObject(r,lane,br,slot);
+      if(!e) return 'rgba(2,6,23,.45)';
+      if(this.simElementPowered(r,lane,br,slot)) return 'rgba(16,185,129,.22)';
+      if(this.simElementTrue(r,lane,br,slot)) return 'rgba(245,158,11,.16)';
+      return 'rgba(15,23,42,.96)';
+    },
+    simElementStroke(r,lane,br,slot){
+      const e=this.simElementObject(r,lane,br,slot);
+      if(!e) return '#334155';
+      if(this.simElementPowered(r,lane,br,slot)) return '#34d399';
+      if(this.simElementTrue(r,lane,br,slot)) return '#f59e0b';
+      return '#22d3ee';
+    },
+    tagIsLegal(tag){ return /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(tag||'')); },
+    validateProject(){
+      const issues=[];
+      const add=(level,title,where,message)=>issues.push({id:issues.length+'_'+level+'_'+title,level,title,where,message});
+      const reserved=new Set(['true','false','class','void','bool','uint','int','float','double','string','if','else','for','while','return','const']);
+      const allOuts=[];
+      const functionBlocks=[];
+
+      if(!this.project || !Array.isArray(this.project.rungs)){
+        add('error','Project model is invalid','Project','The project must contain a rungs array.');
+        return issues;
+      }
+
+      this.project.rungs.forEach((r,ri)=>{
+        const rungName='Rung '+(ri+1)+(r.comment ? ' — '+r.comment : '');
+        if(r.kind==='script') {
+          if(!String(r.code||'').trim()) add('warning','Empty AngelScript rung',rungName,'This custom code rung is empty.');
+          return;
+        }
+        const elements=[];
+        const pushEl=(e,lane,slot,branchIndex=null)=>{
+          if(!e) return;
+          elements.push({e,lane,slot,branchIndex});
+          const raw=String(e.tag||'').trim();
+          const where=branchIndex===null ? rungName+', main slot '+(slot+1) : rungName+', branch '+(branchIndex+1)+', slot '+(slot+1);
+          if(!raw) add('error','Missing tag',where,'Every symbol needs a tag name before the generated AngelScript can be trusted.');
+          else if(!this.tagIsLegal(raw)) add('error','Illegal tag name',where,'Tag "'+raw+'" is not a valid AngelScript identifier. Use letters, numbers, and underscores, and do not start with a number.');
+          else if(reserved.has(raw)) add('error','Reserved tag name',where,'Tag "'+raw+'" is an AngelScript keyword or reserved literal. Rename it before compiling.');
+
+          if(e.type==='OUT') allOuts.push({tag:this.sanitize(raw), raw, rung:ri, where});
+          if(['TON','TOF','CTU','CTD'].includes(e.type)){
+            functionBlocks.push({tag:this.sanitize(raw), raw, type:e.type, preset:e.preset, where});
+            if(!(Number(e.preset)>0)) add('error','Invalid preset',where,e.type+' preset must be a positive number.');
+            if((e.type==='CTU'||e.type==='CTD') && e.resetTag && !this.normalizeBoolExpression(e.resetTag)) add('error','Invalid reset expression',where,'Counter reset expression may only use tags, true/false, !, &&, ||, parentheses, and spaces.');
+          }
+          if(e.type==='OUT' && slot < 7) add('warning','Coil before end of rung',where,'Output coils normally belong near the right side of the rung. The transpiler treats coils as non-blocking, but this may be visually confusing.');
+        };
+
+        if(!Array.isArray(r.main) || r.main.length!==8){
+          add('error','Invalid main path',rungName,'Each rung must have exactly 8 main instruction slots.');
+        }
+
+        (r.main||[]).forEach((e,slot)=>pushEl(e,'main',slot));
+
+        if(!Array.isArray(r.branches)){
+          add('error','Invalid branch list',rungName,'Each rung must contain a branches array.');
+        }
+
+        (r.branches||[]).forEach((br,bi)=>{
+          const where=rungName+', branch '+(bi+1);
+          if(!Number.isInteger(br.start) || !Number.isInteger(br.end)) add('error','Invalid branch nodes',where,'Branch start and end must be integer wire-node indexes.');
+          else {
+            if(br.start < 0 || br.end > 8) add('error','Branch outside rung',where,'Branch nodes must be between 0 and 8.');
+            if(br.end <= br.start) add('error','Invalid branch span',where,'A branch must end to the right of where it starts.');
+          }
+          if(!Array.isArray(br.cells) || br.cells.length!==8) add('error','Invalid branch cells',where,'Each branch must have an 8-slot cells array so it aligns with the main wire-node model.');
+          (br.cells||[]).forEach((e,slot)=>{
+            if(e && (slot < br.start || slot >= br.end)) add('error','Branch cell outside span',where+', slot '+(slot+1),'This branch contains a symbol outside its start/end wire-node span. It will not be rendered or transpiled correctly.');
+            pushEl(e,'branch',slot,bi);
+          });
+          const spanCells=(br.cells||[]).slice(br.start,br.end).filter(Boolean);
+          if(spanCells.length===0) add('warning','Empty branch path',where,'This branch creates a parallel wire path with no symbols. That may intentionally bypass logic, but it is usually suspicious.');
+        });
+
+        const branches=r.branches||[];
+        for(let a=0; a<branches.length; a++){
+          for(let b=a+1; b<branches.length; b++){
+            const A=branches[a], B=branches[b];
+            const same=A.start===B.start && A.end===B.end;
+            const disjoint=A.end<=B.start || B.end<=A.start;
+            const nested=(A.start<=B.start && A.end>=B.end) || (B.start<=A.start && B.end>=A.end);
+            const overlap=!disjoint;
+            if(overlap && !same){
+              add('info','Complex branch structure',rungName,'This rung uses overlapping or nested branch spans. The graph-based transpiler now supports this, but it is still worth testing the generated AngelScript against your intended power flow.');
+            }
+          }
+        }
+
+        if(elements.length===0) add('warning','Empty rung',rungName,'This rung contains no symbols. It will generate rung logic that is always true, but it has no output.');
+        const outs=elements.filter(x=>x.e.type==='OUT');
+        if(elements.length>0 && outs.length===0) add('warning','Outputless rung',rungName,'This rung has logic but no output coil. It may be unfinished or intended only for function block updates.');
+      });
+
+      const coilMap=new Map();
+      for(const o of allOuts){
+        if(!coilMap.has(o.tag)) coilMap.set(o.tag,[]);
+        coilMap.get(o.tag).push(o);
+      }
+      for(const [tag,items] of coilMap){
+        if(tag && items.length>1) add('error','Duplicate output coil','Project','Output tag "'+items[0].raw+'" is written by '+items.length+' coils. Multiple ladder rungs writing the same coil can create scan-order bugs.');
+      }
+
+      const fbMap=new Map();
+      for(const fb of functionBlocks){
+        const key=fb.type+':'+fb.tag;
+        if(!fbMap.has(key)) fbMap.set(key,[]);
+        fbMap.get(key).push(fb);
+      }
+      for(const [key,items] of fbMap){
+        if(items.length>1) add('error','Duplicate function block instance','Project',items[0].type+' instance "'+items[0].raw+'" appears '+items.length+' times. Timers/counters should have unique instance tags.');
+      }
+
+      return issues;
+    },
+    nodeX(n){ return this.nodeStartX + n*this.nodeStep; },
+    slotCenterX(s){ return (this.nodeX(s)+this.nodeX(s+1))/2; },
+    branchLane(r, br){
+      // Assign visual branch rows by horizontal overlap instead of insertion order.
+      // Non-overlapping branches can share the same vertical lane, which keeps
+      // rungs compact and easier to read. This is a drawing-only concern and
+      // does not alter the JSON model or transpiler semantics.
+      const lanes=[];
+      for(const b of r.branches){
+        let lane=0;
+        while(true){
+          const conflict=(lanes[lane]||[]).some(x => !(b.end <= x.start || b.start >= x.end));
+          if(!conflict) break;
+          lane++;
+        }
+        if(!lanes[lane]) lanes[lane]=[];
+        lanes[lane].push(b);
+        if(b.id===br.id) return lane;
+      }
+      return 0;
+    },
+    branchY(r, br){ return this.mainY + 78*(this.branchLane(r, br)+1); },
+    branchLaneCount(r){
+      const lanes=[];
+      for(const b of r.branches){
+        let lane=0;
+        while(true){
+          const conflict=(lanes[lane]||[]).some(x => !(b.end <= x.start || b.start >= x.end));
+          if(!conflict) break;
+          lane++;
+        }
+        if(!lanes[lane]) lanes[lane]=[];
+        lanes[lane].push(b);
+      }
+      return lanes.length;
+    },
+    rungHeight(r){ return 120 + this.branchLaneCount(r)*78; },
+    branchNodes(br){ const out=[]; for(let n=br.start; n<=br.end; n++) out.push(n); return out; },
+    branchSlots(br){ const out=[]; for(let s=br.start; s<br.end; s++) out.push(s); return out; },
+    createRung(comment=''){ return { id:this.uid(), kind:'ladder', comment, main:Array(8).fill(null), branches:[] }; },
+    createScriptRung(comment='AngelScript rung'){ return { id:this.uid(), kind:'script', comment, code:'// Custom AngelScript for this rung. This is emitted inside scan().\n// Example:\n// Q1_Custom = I0 && !I1;' }; },
+    createBranch(start,end){ return { id:this.uid(), start, end, cells:Array(8).fill(null) }; },
+    addRung(){ this.withHistory('Add ladder rung',()=>this.project.rungs.push(this.createRung(''))); },
+    addScriptRung(){ this.withHistory('Add AngelScript rung',()=>this.project.rungs.push(this.createScriptRung())); },
+    insertRungAt(index, rungFactory, label){
+      const safeIndex=Math.max(0, Math.min(index, this.project.rungs.length));
+      this.withHistory(label,()=>{
+        this.project.rungs.splice(safeIndex,0,rungFactory());
+        this.selected=null;
+        this.selectedBranch=null;
+        this.branchStart=null;
+        this.editingCommentId=null;
+      });
+    },
+    insertRungBefore(i){ this.insertRungAt(i, ()=>this.createRung(''), 'Insert ladder rung before'); },
+    insertRungAfter(i){ this.insertRungAt(i+1, ()=>this.createRung(''), 'Insert ladder rung after'); },
+    insertScriptRungAfter(i){ this.insertRungAt(i+1, ()=>this.createScriptRung(), 'Insert AngelScript rung after'); },
+    cloneRungDeep(r){ const c=JSON.parse(JSON.stringify(r)); const renew=(obj)=>{ if(obj&&typeof obj==='object'){ if(obj.id) obj.id=this.uid(); for(const k in obj) renew(obj[k]); }}; renew(c); return c; },
+    duplicateRung(i){ this.withHistory('Duplicate rung',()=>{ const copy=this.cloneRungDeep(this.project.rungs[i]); copy.comment=(copy.comment||'Rung')+' copy'; this.project.rungs.splice(i+1,0,copy); }); },
+    moveRung(i,dir){ const j=i+dir; if(j<0||j>=this.project.rungs.length) return; this.withHistory('Move rung',()=>{ const [r]=this.project.rungs.splice(i,1); this.project.rungs.splice(j,0,r); }); },
+    removeRung(i){ this.withHistory('Delete rung',()=>{ this.project.rungs.splice(i,1); this.selected=null; this.selectedBranch=null; if(this.editingCommentId) this.editingCommentId=null; }); },
+    clearAll(){ if(confirm('Clear all rungs?')) { this.withHistory('Clear all',()=>{ this.project.rungs=[]; this.project.rungs.push(this.createRung('')); this.editingCommentId=null; }); }},
+    startEditComment(r){
+      if(this.editingCommentId===r.id){ this.editingCommentId=null; return; }
+      this.editingCommentId=r.id;
+      this.$nextTick(()=>{
+        const input=document.activeElement;
+        // autofocus usually handles this; this fallback keeps the interaction reliable after Vue updates.
+        const rungInputs=[...document.querySelectorAll('input[placeholder="Rung comment"]')];
+        const last=rungInputs[rungInputs.length-1];
+        if(last){ last.focus(); last.select(); }
+      });
+    },
+    dragTool(t){ this.draggedTool=t; },
+    newSymbol(t){
+      const e={id:this.uid(), type:t, tag:this.defaultTag(t)};
+      if(t==='TON'||t==='TOF') e.preset=1000;
+      if(t==='CTU'||t==='CTD') { e.preset=10; e.resetTag=''; }
+      return e;
+    },
+    defaultTag(t){
+      if(t==='NO') return 'I0';
+      if(t==='NC') return 'I1';
+      if(t==='OUT') return 'Q0';
+      if(t==='TON') return 'T_OnDelay';
+      if(t==='TOF') return 'T_OffDelay';
+      if(t==='CTU') return 'C_Up';
+      if(t==='CTD') return 'C_Down';
+      return 'TAG';
+    },
+    hasPreset(e){ return e && ['TON','TOF','CTU','CTD'].includes(e.type); },
+    isCounter(e){ return e && ['CTU','CTD'].includes(e.type); },
+    nodeFill(r,n){
+      if(this.branchStart && this.branchStart.rung===r && this.branchStart.node===n) return '#22d3ee';
+      return this.mode==='branch' ? 'rgba(34,211,238,.16)' : '#0f172a';
+    },
+    wireNodeClick(r,n){
+      if(this.mode!=='branch'){
+        this.mode='branch';
+        this.branchStart={rung:r,node:n};
+        this.show('Start node selected. Click end node.');
+        return;
+      }
+      if(!this.branchStart || this.branchStart.rung!==r){
+        this.branchStart={rung:r,node:n};
+        this.show('Start node selected. Click end node.');
+        return;
+      }
+      const a=Math.min(this.branchStart.node,n);
+      const b=Math.max(this.branchStart.node,n);
+      if(b<=a){
+        this.show('Pick a different end node');
+        return;
+      }
+      this.pushHistory('Add branch');
+      const br=this.createBranch(a,b);
+      r.branches.push(br);
+      this.selectedBranch={rung:r,branchId:br.id};
+      this.branchStart=null;
+      this.mode='select';
+      this.show('Branch added');
+    },
+    branchClick(r, branchId){
+      this.selected=null;
+      this.selectedBranch={rung:r,branchId};
+      if(this.mode==='delete') this.deleteBranch(r,branchId);
+      else this.show('Branch selected');
+    },
+    deleteBranch(r, branchId){
+      const idx=r.branches.findIndex(b=>b.id===branchId);
+      if(idx>=0){ this.pushHistory('Delete branch'); r.branches.splice(idx,1); }
+      this.selectedBranch=null;
+      this.branchStart=null;
+      this.show('Branch deleted');
+    },
+    slotClick(r, lane, br, slot){
+      if(this.mode==='branch'){
+        this.show('Branches attach to wire nodes, not contacts');
+        return;
+      }
+      const arr = lane==='main' ? r.main : br.cells;
+      if(this.mode==='delete'){
+        this.pushHistory('Delete symbol');
+        this.pushHistory('Delete symbol');
+        arr[slot]=null;
+        this.selected=null;
+        return;
+      }
+      if(!arr[slot]) { this.pushHistory('Add symbol'); arr[slot]=this.newSymbol(this.selectedTool); }
+      this.selected={rung:r,lane,branch:br,slot,el:arr[slot]};
+      if(lane==='branch' && br) this.selectedBranch={rung:r,branchId:br.id};
+    },
+    symbolClick(r,lane,br,slot){
+      if(this.mode==='branch'){
+        this.show('Branches attach to wire nodes, not contacts');
+        return;
+      }
+      const arr = lane==='main' ? r.main : br.cells;
+      if(this.mode==='delete'){
+        this.pushHistory('Delete symbol');
+        this.pushHistory('Delete symbol');
+        arr[slot]=null;
+        this.selected=null;
+        return;
+      }
+      this.selected={rung:r,lane,branch:br,slot,el:arr[slot]};
+      if(lane==='branch' && br) this.selectedBranch={rung:r,branchId:br.id};
+    },
+    dropOnMain(r,slot){
+      const t=this.draggedTool || this.selectedTool;
+      this.pushHistory('Drop symbol');
+      r.main[slot]=this.newSymbol(t);
+      this.selected={rung:r,lane:'main',branch:null,slot,el:r.main[slot]};
+    },
+    dropOnBranch(r,br,slot){
+      const t=this.draggedTool || this.selectedTool;
+      this.pushHistory('Drop branch symbol');
+      br.cells[slot]=this.newSymbol(t);
+      this.selected={rung:r,lane:'branch',branch:br,slot,el:br.cells[slot]};
+      this.selectedBranch={rung:r,branchId:br.id};
+    },
+    sampleProject(){
+      const r1=this.createRung('Start/stop seal-in motor latch');
+      r1.main[0]={id:this.uid(),type:'NO',tag:'I0_Start'};
+      r1.main[2]={id:this.uid(),type:'NC',tag:'I1_Stop'};
+      r1.main[7]={id:this.uid(),type:'OUT',tag:'Q0_Motor'};
+      // Seal-in branch bypasses only the Start contact.
+      // Stop remains downstream in series, so it always breaks the latch.
+      const b1=this.createBranch(0,1);
+      b1.cells[0]={id:this.uid(),type:'NO',tag:'Q0_Motor'};
+      r1.branches.push(b1);
+
+      const r2=this.createRung('Alarm if over temperature');
+      r2.main[0]={id:this.uid(),type:'NO',tag:'TempHigh'};
+      r2.main[3]={id:this.uid(),type:'TON',tag:'T_OverTemp',preset:2000};
+      r2.main[7]={id:this.uid(),type:'OUT',tag:'Q_Alarm'};
+
+      const r3=this.createRung('Multiple branches example');
+      r3.main[0]={id:this.uid(),type:'NO',tag:'I0_Auto'};
+      r3.main[7]={id:this.uid(),type:'OUT',tag:'Q_Run'};
+      const b31=this.createBranch(0,5);
+      b31.cells[0]={id:this.uid(),type:'NO',tag:'I1_Manual'};
+      const b32=this.createBranch(0,5);
+      b32.cells[0]={id:this.uid(),type:'NO',tag:'I2_Remote'};
+      r3.branches.push(b31,b32);
+
+      const r4=this.createScriptRung('Custom AngelScript rung example');
+      r4.code='// This rung is passed through exactly as typed inside scan().\n// Use it for logic that is clearer in text than in ladder.\nQ_Debug = I0_Auto && !I1_Stop;';
+
+      this.project={name:'PiLab Ladder Project',scan_ms:5,rungs:[r1,r2,r3,r4]};
+      this.jsonDraft=this.jsonModel;
+      this.selected=null;
+      this.selectedBranch=null;
+      this.mode='select';
+      this.branchStart=null;
+      this.history=[];
+      this.editSnapshot=null;
+    },
+    saveLocal(){ localStorage.setItem('pilab_ladder_wire_model', JSON.stringify(this.project)); this.show('Saved locally'); },
+    loadLocal(){
+      const raw=localStorage.getItem('pilab_ladder_wire_model');
+      if(!raw) return this.show('No saved project');
+      this.pushHistory('Load local project');
+      this.project=JSON.parse(raw);
+      this.selected=null; this.selectedBranch=null;
+      this.show('Loaded');
+    },
+    applyJson(){
+      try{ this.pushHistory('Apply JSON'); this.project=JSON.parse(this.jsonDraft); this.selected=null; this.selectedBranch=null; this.show('JSON applied'); }
+      catch(e){ alert('Invalid JSON: '+e.message); }
+    },
+    download(name,text,mime){
+      const blob=new Blob([text],{type:mime});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=url; a.download=name; a.click();
+      URL.revokeObjectURL(url);
+    },
+    downloadJson(){ this.download('pilab_ladder_project.json',this.jsonModel,'application/json'); },
+    importJsonFile(ev){
+      const file = ev && ev.target && ev.target.files ? ev.target.files[0] : null;
+      if(!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const parsed = JSON.parse(String(reader.result || ''));
+          this.normalizeImportedProject(parsed);
+          this.pushHistory('Import JSON file');
+          this.project = parsed;
+          this.jsonDraft = this.jsonModel;
+          this.selected = null;
+          this.selectedBranch = null;
+          this.branchStart = null;
+          this.editingCommentId = null;
+          this.mode = 'select';
+          this.show('Imported '+(file.name || 'JSON project'));
+        } catch(e) {
+          alert('Could not import JSON: '+e.message);
+        } finally {
+          ev.target.value = '';
+        }
+      };
+      reader.onerror = () => {
+        alert('Could not read file: '+(reader.error ? reader.error.message : 'unknown error'));
+        ev.target.value = '';
+      };
+      reader.readAsText(file);
+    },
+    normalizeImportedProject(p){
+      if(!p || typeof p !== 'object') throw new Error('Project root must be a JSON object.');
+      if(!Array.isArray(p.rungs)) throw new Error('Project must contain a rungs array.');
+      if(!p.name) p.name = 'Imported PiLab Ladder Project';
+      if(!p.scan_ms) p.scan_ms = 5;
+      for(const r of p.rungs){
+        if(!r.id) r.id = this.uid();
+        if(typeof r.comment !== 'string') r.comment = r.comment ? String(r.comment) : '';
+        if(r.kind === 'script'){
+          if(typeof r.code !== 'string') r.code = '';
+          continue;
+        }
+        r.kind = r.kind || 'ladder';
+        if(!Array.isArray(r.main)) r.main = Array(8).fill(null);
+        while(r.main.length < 8) r.main.push(null);
+        if(r.main.length > 8) r.main = r.main.slice(0,8);
+        if(!Array.isArray(r.branches)) r.branches = [];
+        for(const b of r.branches){
+          if(!b.id) b.id = this.uid();
+          if(typeof b.start !== 'number') b.start = Number(b.start)||0;
+          if(typeof b.end !== 'number') b.end = Number(b.end)||0;
+          if(!Array.isArray(b.cells)) b.cells = Array(8).fill(null);
+          while(b.cells.length < 8) b.cells.push(null);
+          if(b.cells.length > 8) b.cells = b.cells.slice(0,8);
+        }
+      }
+    },
+    downloadAs(){ this.download('pilab_ladder_generated.as',this.transpile(),'text/plain'); },
+    copy(t){ navigator.clipboard.writeText(t); this.show('Copied'); },
+    branchCount(){ return this.project.rungs.reduce((a,r)=>a+((r.branches&&r.kind!=='script')?r.branches.length:0),0); },
+    allElements(){
+      const a=[];
+      for(const r of this.project.rungs){
+        if(r.kind==='script') continue;
+        for(const e of (r.main||[])) if(e) a.push(e);
+        for(const b of (r.branches||[])) for(const e of (b.cells||[])) if(e) a.push(e);
+      }
+      return a;
+    },
+    sanitize(s){ return String(s||'TAG').replace(/[^A-Za-z0-9_]/g,'_').replace(/^([0-9])/,'_$1'); },
+    uniqueTypes(types){
+      const m=new Map();
+      for(const e of this.allElements()) if(types.includes(e.type)) m.set(e.type+':'+this.sanitize(e.tag), e);
+      return [...m.values()];
+    },
+    elementCondition(e){
+      if(!e) return 'true';
+      const tag=this.sanitize(e.tag);
+      if(e.type==='NO') return tag;
+      if(e.type==='NC') return '!'+tag;
+      if(['TON','TOF','CTU','CTD'].includes(e.type)) return tag+'.Q()';
+      // Coils and unknown symbols do not block power flow.
+      return 'true';
+    },
+
+    exprIsTrue(x){ return !x || x === 'true'; },
+    isWrappedExpr(expr){
+      // True only when one outer parenthesis pair wraps the entire expression.
+      // This prevents readable ladder output like ((A || B)) && C.
+      expr = String(expr || '').trim();
+      if(!expr.startsWith('(') || !expr.endsWith(')')) return false;
+      let depth = 0;
+      for(let i=0; i<expr.length; i++){
+        const ch = expr[i];
+        if(ch === '(') depth++;
+        else if(ch === ')') depth--;
+        if(depth === 0 && i < expr.length - 1) return false;
+        if(depth < 0) return false;
+      }
+      return depth === 0;
+    },
+    stripRedundantOuterParens(expr){
+      expr = String(expr || '').trim();
+      while(this.isWrappedExpr(expr)){
+        const inner = expr.slice(1, -1).trim();
+        if(!this.isWrappedExpr(inner) && inner === expr.slice(1, -1).trim()) {
+          // Remove only one wrapper unless the result is still wrapped.
+          expr = inner;
+          break;
+        }
+        expr = inner;
+      }
+      return expr;
+    },
+    exprAnd(parts){
+      const clean = parts.filter(p => p && p !== 'true').map(p => String(p).trim());
+      if(!clean.length) return 'true';
+      if(clean.length === 1) return clean[0];
+      return clean.map(p => {
+        const expr = this.stripRedundantOuterParens(p);
+        return expr.includes(' || ') ? '('+expr+')' : expr;
+      }).join(' && ');
+    },
+    exprOr(parts){
+      const clean=[];
+      for(const p of parts){
+        if(!p || p === 'false') continue;
+        if(p === 'true') return 'true';
+        clean.push(this.stripRedundantOuterParens(String(p).trim()));
+      }
+      if(!clean.length) return 'false';
+      if(clean.length === 1) return clean[0];
+      return '(' + clean.join(' || ') + ')';
+    },
+    elementCondition(e){
+      if(!e) return 'true';
+      const tag=this.sanitize(e.tag);
+      if(e.type==='NO') return tag;
+      if(e.type==='NC') return '!'+tag;
+      if(['TON','TOF','CTU','CTD'].includes(e.type)) return tag+'.Q()';
+      // Coils and unknown symbols do not block power flow.
+      return 'true';
+    },
+
+    seriesCondition(cells, startSlot=0, endSlot=8){
+      const expr=[];
+      for(let i=startSlot; i<endSlot; i++){
+        const e=cells[i];
+        if(!e) continue;
+        if(e.type==='OUT') continue;
+        expr.push(this.elementCondition(e));
+      }
+      return this.exprAnd(expr);
+    },
+
+    ladderEdges(r){
+      // Formal wire-node graph model.
+      // Nodes are 0..8. Each main slot is an edge i -> i+1.
+      // Each branch is a shortcut edge start -> end whose condition is the
+      // series condition of all symbols on that branch path.
+      // Because all legal edges move left-to-right, this is a tiny DAG and can
+      // be solved with dynamic programming instead of fragile branch grouping.
+      const edges=[];
+      for(let i=0; i<8; i++){
+        edges.push({kind:'main', from:i, to:i+1, slot:i, cond:this.elementCondition((r.main||[])[i])});
+      }
+      for(const br of (r.branches||[])){
+        if(!Number.isInteger(br.start) || !Number.isInteger(br.end)) continue;
+        if(br.start < 0 || br.end > 8 || br.end <= br.start) continue;
+        edges.push({kind:'branch', from:br.start, to:br.end, branch:br, cond:this.seriesCondition(br.cells||[], br.start, br.end)});
+      }
+      return edges;
+    },
+
+    expressionFromNode(r, startNode=0, endNode=8){
+      const edges=this.ladderEdges(r);
+      const byFrom=new Map();
+      for(const e of edges){
+        if(!byFrom.has(e.from)) byFrom.set(e.from, []);
+        byFrom.get(e.from).push(e);
+      }
+      const memo=new Map();
+      const solve=(node)=>{
+        if(node===endNode) return 'true';
+        if(node>endNode) return 'false';
+        if(memo.has(node)) return memo.get(node);
+        const alternatives=[];
+        for(const e of (byFrom.get(node)||[])){
+          if(e.to > endNode) continue;
+          const tail=solve(e.to);
+          if(tail==='false') continue;
+          alternatives.push(this.exprAnd([e.cond, tail]));
+        }
+        const out=this.exprOr(alternatives);
+        memo.set(node,out);
+        return out;
+      };
+      return solve(startNode);
+    },
+
+    powerToNodeExpression(r, targetNode){
+      // Expression for power arriving at a wire node from the left.
+      // Used for correct function-block input conditions and future live monitor mode.
+      if(targetNode <= 0) return 'true';
+      return this.expressionFromNode(r, 0, targetNode);
+    },
+
+    branchInputToSlotExpression(r, br, slot){
+      // Power arriving at a symbol on a branch = power at branch start node AND
+      // all preceding symbols on that same branch path.
+      return this.exprAnd([
+        this.powerToNodeExpression(r, br.start),
+        this.seriesCondition(br.cells||[], br.start, slot)
+      ]);
+    },
+
+    mainInputToSlotExpression(r, slot){
+      // Power arriving at a main-path symbol = all valid paths from node 0 to
+      // that symbol's left wire node.
+      return this.powerToNodeExpression(r, slot);
+    },
+
+    readableExpressionFromNode(r, startNode=0, endNode=8, ignoredBranchIds=null){
+      // Human-readable ladder expression builder.
+      //
+      // The graph solver is excellent for correctness, but it expands classic
+      // ladder into a sum-of-paths form:
+      //     Start && Stop || SealIn && Stop
+      //
+      // This routine tries to preserve the way a human reads ladder left-to-right:
+      //     (Start || SealIn) && Stop
+      //
+      // It handles ordinary branch groups where one or more branches leave the
+      // same wire node and rejoin at the same wire node. More complex mixed-end
+      // or partially-overlapping structures fall back to the formal graph solver.
+      ignoredBranchIds = ignoredBranchIds || new Set();
+
+      const validBranches = (r.branches||[]).filter(br =>
+        br && !ignoredBranchIds.has(br.id) &&
+        Number.isInteger(br.start) && Number.isInteger(br.end) &&
+        br.start >= 0 && br.end <= 8 && br.end > br.start
+      );
+
+      const solve = (node, stopNode, ignored) => {
+        if(node >= stopNode) return node === stopNode ? 'true' : null;
+
+        const here = validBranches.filter(br =>
+          !ignored.has(br.id) && br.start === node && br.end <= stopNode
+        );
+
+        if(here.length){
+          const end = here[0].end;
+
+          // If branches starting at the same node rejoin at different nodes,
+          // readability grouping becomes ambiguous. Use graph fallback.
+          if(here.some(br => br.end !== end)) return null;
+
+          // Do not compress this branch group if another branch starts inside
+          // the section we are about to group but rejoins after it. That is a
+          // crossing/overlapping branch. Grouping the earlier branch would hide
+          // the later branch from the main-section expression and could drop a
+          // valid power-flow path. Let the formal graph solver handle it.
+          const hasCrossingBranch = validBranches.some(br =>
+            !ignored.has(br.id) &&
+            !here.some(h => h.id === br.id) &&
+            br.start > node && br.start < end &&
+            br.end > end && br.end <= stopNode
+          );
+          if(hasCrossingBranch) return null;
+
+          const nextIgnored = new Set(ignored);
+          for(const br of here) nextIgnored.add(br.id);
+
+          const mainSection = solve(node, end, nextIgnored);
+          if(mainSection === null) return null;
+
+          const alternatives = [];
+          if(mainSection !== 'true') alternatives.push(mainSection);
+
+          for(const br of here){
+            const bx = this.seriesCondition(br.cells||[], br.start, br.end);
+            if(bx !== 'true') alternatives.push(bx);
+          }
+
+          const group = alternatives.length ? this.exprOr(alternatives) : 'true';
+          const tail = solve(end, stopNode, ignored);
+          if(tail === null) return null;
+          return this.exprAnd([group, tail]);
+        }
+
+        const e = (r.main||[])[node];
+        const cond = e && e.type !== 'OUT' ? this.elementCondition(e) : 'true';
+        const tail = solve(node+1, stopNode, ignored);
+        if(tail === null) return null;
+        return this.exprAnd([cond, tail]);
+      };
+
+      return solve(startNode, endNode, ignoredBranchIds);
+    },
+
+    rungExpression(r){
+      const readable = this.readableExpressionFromNode(r,0,8);
+      if(readable && readable !== 'false') return readable;
+
+      // Fallback for complex graph shapes that cannot be expressed cleanly as
+      // nested left-to-right ladder groups. This preserves correctness.
+      const expr=this.expressionFromNode(r,0,8);
+      return expr && expr !== 'false' ? expr : 'false';
+    },
+
+    outputs(r){
+      const out=[];
+      for(const e of r.main) if(e && e.type==='OUT') out.push(e);
+      for(const b of r.branches) for(const e of b.cells) if(e && e.type==='OUT') out.push(e);
+      return out;
+    },
+    transpile(){
+      const timers=this.uniqueTypes(['TON','TOF']);
+      const counters=this.uniqueTypes(['CTU','CTD']);
+      const scanMs=this.project.scan_ms||5;
+      let s='// Generated by PiLab Ladder Logic Editor\n';
+      s+='// Project: '+(this.project.name||'Untitled')+'\n\n';
+
+      if(timers.length){
+        s+='class TON\n{\n';
+        s+='    uint preset_ms;\n    uint elapsed_ms = 0;\n    bool output = false;\n\n';
+        s+='    TON(uint preset) { preset_ms = preset; }\n\n';
+        s+='    void update(bool input, uint scan_ms)\n    {\n';
+        s+='        if (input)\n        {\n';
+        s+='            if (elapsed_ms < preset_ms) elapsed_ms += scan_ms;\n';
+        s+='            if (elapsed_ms >= preset_ms) output = true;\n';
+        s+='        }\n        else\n        {\n';
+        s+='            elapsed_ms = 0;\n            output = false;\n';
+        s+='        }\n    }\n\n';
+        s+='    bool Q() const { return output; }\n    uint ET() const { return elapsed_ms; }\n};\n\n';
+
+        s+='class TOF\n{\n';
+        s+='    uint preset_ms;\n    uint elapsed_ms = 0;\n    bool output = false;\n\n';
+        s+='    TOF(uint preset) { preset_ms = preset; }\n\n';
+        s+='    void update(bool input, uint scan_ms)\n    {\n';
+        s+='        if (input)\n        {\n';
+        s+='            output = true;\n            elapsed_ms = 0;\n';
+        s+='        }\n';
+        s+='        else if (output)\n        {\n';
+        s+='            if (elapsed_ms < preset_ms) elapsed_ms += scan_ms;\n';
+        s+='            if (elapsed_ms >= preset_ms) { elapsed_ms = preset_ms; output = false; }\n';
+        s+='        }\n';
+        s+='        else\n        {\n';
+        s+='            elapsed_ms = preset_ms;\n';
+        s+='        }\n';
+        s+='    }\n\n';
+        s+='    bool Q() const { return output; }\n    uint ET() const { return elapsed_ms; }\n};\n\n';
+      }
+
+      if(counters.length){
+        if(counters.some(c=>c.type==='CTU')){
+          s+='class CTU\n{\n';
+          s+='    uint preset;\n    uint count = 0;\n    bool last = false;\n    bool output = false;\n\n';
+          s+='    CTU(uint pv) { preset = pv; }\n\n';
+          s+='    void update(bool input, bool reset=false)\n    {\n';
+          s+='        if (reset) { count = 0; output = false; last = input; return; }\n';
+          s+='        if (input && !last) count++;\n        last = input;\n        output = count >= preset;\n';
+          s+='    }\n\n    bool Q() const { return output; }\n    uint CV() const { return count; }\n};\n\n';
+        }
+        if(counters.some(c=>c.type==='CTD')){
+          s+='class CTD\n{\n';
+          s+='    uint preset;\n    uint count;\n    bool last = false;\n    bool output = false;\n\n';
+          s+='    CTD(uint pv) { preset = pv; count = pv; output = count == 0; }\n\n';
+          s+='    void update(bool input, bool reset=false)\n    {\n';
+          s+='        if (reset) { count = preset; output = false; last = input; return; }\n';
+          s+='        if (input && !last && count > 0) count--;\n        last = input;\n        output = count == 0;\n';
+          s+='    }\n\n    bool Q() const { return output; }\n    uint CV() const { return count; }\n};\n\n';
+        }
+      }
+
+      for(const t of timers) s+=t.type+' '+this.sanitize(t.tag)+'('+(t.preset||1000)+');\n';
+      for(const c of counters) s+=c.type+' '+this.sanitize(c.tag)+'('+(c.preset||10)+');\n';
+      if(timers.length||counters.length) s+='\n';
+
+      s+='void scan()\n{\n';
+      this.project.rungs.forEach((r,i)=>{
+        s+='    // Rung '+(i+1)+(r.comment?': '+r.comment:'')+'\n';
+        if(r.kind==='script'){
+          const code=String(r.code||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+          if(code.trim()) s+=code.replace(/\n?$/,'\n');
+          else s+='    // Empty AngelScript rung\n';
+          s+='\n';
+          return;
+        }
+        const rungExpr = this.rungExpression(r);
+        s+='    bool rung_'+(i+1)+' = '+rungExpr+';\n';
+
+        const updateBlocks=[];
+        for(let slot=0; slot<r.main.length; slot++){
+          const e = r.main[slot];
+          if(e&&['TON','TOF','CTU','CTD'].includes(e.type)){
+            updateBlocks.push({e,cond:this.mainInputToSlotExpression(r, slot)});
+          }
+        }
+        for(const b of r.branches){
+          for(let slot=b.start; slot<b.end; slot++){
+            const e = b.cells[slot];
+            if(e&&['TON','TOF','CTU','CTD'].includes(e.type)){
+              updateBlocks.push({e,cond:this.branchInputToSlotExpression(r, b, slot)});
+            }
+          }
+        }
+
+        for(const u of updateBlocks){
+          if(u.e.type==='TON'||u.e.type==='TOF') s+='    '+this.sanitize(u.e.tag)+'.update(('+u.cond+'), '+scanMs+');\n';
+          else {
+            const resetExpr = u.e.resetTag ? (this.normalizeBoolExpression(u.e.resetTag) || 'false') : 'false';
+            s+='    '+this.sanitize(u.e.tag)+'.update(('+u.cond+'), ('+resetExpr+'));\n';
+          }
+        }
+
+        for(const o of this.outputs(r)) s+='    '+this.sanitize(o.tag)+' = rung_'+(i+1)+';\n';
+        s+='\n';
+      });
+      s+='}\n';
+      return s;
+    }
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
