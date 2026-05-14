@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openpilab.org/schemas/pilab-ladder-project.schema.json",
+  "title": "PiLab Ladder Project",
+  "description": "Saved project format for the PiLab browser-based ladder editor. Ladder rungs use a fixed 8-slot wire-node model with wire nodes 0 through 8.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["name", "scan_ms", "rungs"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Optional schema identifier for future migrations.",
+      "const": "pilab.ladder.project"
+    },
+    "schema_version": {
+      "type": "integer",
+      "description": "Optional project schema version. Version 1 is the first formal schema.",
+      "minimum": 1,
+      "default": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scan_ms": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Nominal PLC/script scan time in milliseconds. Used by generated timer code and the browser simulator."
+    },
+    "rungs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/rung" }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+      "description": "AngelScript-compatible identifier."
+    },
+    "nullableSymbol": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/symbol" }
+      ]
+    },
+    "slotArray8": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/nullableSymbol" }
+    },
+    "symbol": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "type", "tag"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "type": {
+          "type": "string",
+          "enum": ["NO", "NC", "OUT", "TON", "TOF", "CTU", "CTD"]
+        },
+        "tag": { "$ref": "#/$defs/identifier" },
+        "preset": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Timer preset in milliseconds or counter preset count. Required by TON, TOF, CTU, and CTD."
+        },
+        "resetTag": {
+          "type": "string",
+          "description": "Counter control Boolean expression. For CTU this resets CV to 0; for CTD this reloads CV from preset. Supports identifiers, true/false, !, &&, ||, and parentheses."
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "enum": ["TON", "TOF", "CTU", "CTD"] } }, "required": ["type"] },
+          "then": { "required": ["preset"] }
+        },
+        {
+          "if": { "properties": { "type": { "enum": ["CTU", "CTD"] } }, "required": ["type"] },
+          "then": { "properties": { "resetTag": { "type": "string" } } }
+        }
+      ]
+    },
+    "branch": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "start", "end", "cells"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "start": { "type": "integer", "minimum": 0, "maximum": 8 },
+        "end": { "type": "integer", "minimum": 0, "maximum": 8 },
+        "cells": { "$ref": "#/$defs/slotArray8" }
+      }
+    },
+    "ladderRung": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "kind", "comment", "main", "branches"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "const": "ladder" },
+        "comment": { "type": "string" },
+        "main": { "$ref": "#/$defs/slotArray8" },
+        "branches": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/branch" }
+        }
+      }
+    },
+    "scriptRung": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "kind", "comment", "code"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "const": "script" },
+        "comment": { "type": "string" },
+        "code": { "type": "string" }
+      }
+    },
+    "rung": {
+      "oneOf": [
+        { "$ref": "#/$defs/ladderRung" },
+        { "$ref": "#/$defs/scriptRung" }
+      ]
+    }
+  }
+}
