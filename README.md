@@ -79,8 +79,11 @@ flowchart TD
     M --> P[Field Devices]
 ```
 
-# Video Demo
+# Video Demo PLC Interface
 https://www.youtube.com/watch?v=MBs3DlIrDFY
+
+# Video Demo Ladder Logic Editor/Simulator
+https://youtu.be/OfzHz8rGLJE?si=5LT6dlCu50iBqVzB
 
 # PiLab ESP32-P4 PLC (Alpha)
 
