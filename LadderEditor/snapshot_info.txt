@@ -1,0 +1,26 @@
+﻿PiLab Snapshot Info
+===================
+Created:       2026-05-18 07:46:31
+Project Root:  C:\Users\tonyf\Downloads\P4_PLC
+Script Dir:    C:\Users\tonyf\Downloads\P4_PLC\tools
+Git Found:     True
+Git Path:      C:\Program Files\Git\cmd\git.exe
+Git Repo Root: C:/Users/tonyf/Downloads/P4_PLC
+Git Branch:    main
+Git ShortHash: c6e2dd4
+Git FullHash:  c6e2dd4c3f3097908df1c6a05e17892505bd1578
+Latest Commit: c6e2dd4 Update Web Flasher firmware with latest Web app
+Git Warning:   
+
+Git Status --short:
+ M LadderEditor/package-lock.json
+ M LadderEditor/package.json
+ M LadderEditor/src/App.vue
+ M experimental/ladder/pilab_ladder_editor.html
+?? LadderEditor/README_single_build.md
+?? LadderEditor/snapshot_info.txt
+?? LadderEditor/vite.single.config.js
+?? package-lock.json
+?? package.json
+?? tools/PiLabZips_WithLadder.ps1
+?? tools/copyLadder.ps1

@@ -4,8 +4,8 @@
     <div class="flex items-center gap-3 min-w-0">
       <div class="w-11 h-11 rounded-xl border border-cyan-300/40 bg-cyan-400/10 text-cyan-300 flex items-center justify-center font-black">P</div>
       <div class="min-w-0">
-        <h1 class="text-2xl font-bold truncate">PiLab Ladder Logic Editor <span class="text-sm text-cyan-300 align-middle">v0.1.13-bundle-import</span></h1>
-        <p class="text-sm text-slate-400 truncate">Correct branch model: branches connect wire-node to wire-node, not contact-center to contact-center.</p>
+        <h1 class="text-2xl font-bold truncate">PiLab Ladder Logic Editor <span class="text-sm text-cyan-300 align-middle">v0.1.14</span></h1>
+        <p class="text-sm text-slate-400 truncate">Alpha edition: changes may break saved files.</p>
       </div>
     </div>
     <div class="flex flex-wrap justify-end gap-2 shrink-0">
@@ -390,19 +390,19 @@
       </div>
 
       <div v-show="activeView==='json'" class="min-h-0 overflow-hidden bg-slate-950/70">
-        <textarea v-model="jsonDraft" @change="applyJson" spellcheck="false" class="mono w-full h-full text-xs text-slate-300 overflow-auto scrollbar p-4 bg-transparent outline-none resize-none"></textarea>
+        <div ref="jsonEditorHost" class="code-editor-host ladder-code-editor ladder-json-editor"></div>
       </div>
 
-      <div v-show="activeView==='angelscript'" class="min-h-0 overflow-auto scrollbar bg-slate-950/70">
+      <div v-show="activeView==='angelscript'" class="min-h-0 overflow-hidden bg-slate-950/70">
         <div v-if="includeAngelScriptTags" class="m-4 mb-0 rounded-xl border border-cyan-300/25 bg-cyan-500/5 p-3 text-xs text-slate-300 leading-relaxed">
           <span class="font-semibold text-cyan-200">Add Tags is enabled.</span>
           The export includes optional global declarations for discovered tags so the script can be compiled/tested outside the PLC runtime. Turn this off when exporting for firmware that already provides PLC tags.
         </div>
-        <pre class="mono text-xs text-slate-300 p-4 whitespace-pre">{{transpile(includeAngelScriptTags)}}</pre>
+        <div ref="angelScriptEditorHost" class="code-editor-host ladder-code-editor" :class="includeAngelScriptTags ? 'with-note' : ''"></div>
       </div>
 
-      <div v-show="activeView==='javascript'" class="min-h-0 overflow-auto scrollbar bg-slate-950/70">
-        <pre class="mono text-xs text-slate-300 p-4 whitespace-pre">{{transpileJavaScript()}}</pre>
+      <div v-show="activeView==='javascript'" class="min-h-0 overflow-hidden bg-slate-950/70">
+        <div ref="javascriptEditorHost" class="code-editor-host ladder-code-editor"></div>
       </div>
 
       <div v-show="activeView==='tags'" class="min-h-0 h-full overflow-y-auto overflow-x-hidden scrollbar bg-slate-950/70 p-4 space-y-4">
@@ -737,7 +737,18 @@
 </template>
 
 <script>
+import { nextTick } from 'vue';
 import SymbolRender from './components/SymbolRender.vue';
+import { minimalEditor, readonlyEditor } from 'prism-code-editor-lightweight/setups';
+import { defaultCommands, editHistory } from 'prism-code-editor-lightweight/commands';
+import { matchBrackets } from 'prism-code-editor-lightweight/match-brackets';
+import { highlightBracketPairs } from 'prism-code-editor-lightweight/highlight-brackets';
+import { indentGuides } from 'prism-code-editor-lightweight/guides';
+import { cursorPosition } from 'prism-code-editor-lightweight/cursor';
+import 'prism-code-editor-lightweight/prism/languages/clike';
+import 'prism-code-editor-lightweight/prism/languages/cpp';
+import 'prism-code-editor-lightweight/prism/languages/javascript';
+import 'prism-code-editor-lightweight/prism/languages/json';
 import { ladderModelMethods } from './ladder/ladderModel.js';
 import { ladderValidationMethods } from './ladder/ladderValidation.js';
 import { ladderSimulatorMethods } from './ladder/ladderSimulator.js';
@@ -798,6 +809,9 @@ export default {
       tagRegistryImported:{},
       tagRegistryFilter:'',
       includeAngelScriptTags:false,
+      prismEditors:{ json:null, angelscript:null, javascript:null },
+      prismEditorsReady:false,
+      syncingJsonEditor:false,
       project:{ name:'PiLab Ladder Project', description:'', scan_ms:5, rungs:[] },
       tools:[
         {type:'NO', label:'Normally Open', desc:'True when input/tag is true.', icon:'<svg width="48" height="32"><line x1="2" y1="16" x2="14" y2="16" stroke="#e2e8f0" stroke-width="2"/><line x1="34" y1="16" x2="46" y2="16" stroke="#e2e8f0" stroke-width="2"/><line x1="15" y1="4" x2="15" y2="28" stroke="#67e8f9" stroke-width="3"/><line x1="33" y1="4" x2="33" y2="28" stroke="#67e8f9" stroke-width="3"/></svg>'},
@@ -896,14 +910,117 @@ export default {
       });
     }
   },
-  mounted(){ this.sampleProject(); },
-  watch:{ project:{ deep:true, handler(){ this.jsonDraft=this.jsonModel; }}},
+  mounted(){
+    this.sampleProject();
+    nextTick(() => this.initPrismOutputEditors());
+  },
+  beforeUnmount(){
+    this.destroyPrismOutputEditors();
+  },
+  watch:{
+    project:{
+      deep:true,
+      handler(){
+        this.jsonDraft=this.jsonModel;
+        this.refreshPrismOutputEditors();
+      }
+    },
+    includeAngelScriptTags(){
+      this.refreshPrismOutputEditors();
+    }
+  },
   methods:{
     ...ladderModelMethods,
     ...ladderValidationMethods,
     ...ladderSimulatorMethods,
     ...ladderTranspilerMethods,
     ...ladderTagRegistryMethods,
+    initPrismOutputEditors(){
+      if(this.prismEditorsReady) return;
+      const common = {
+        theme:'github-dark',
+        tabSize:2,
+        insertSpaces:true,
+        lineNumbers:true,
+        wordWrap:false
+      };
+
+      const makeEditable = (host, language, value, onUpdate) => {
+        if(!host) return null;
+        const ed = minimalEditor(host, { ...common, language, value, onUpdate }, () => {
+          this.installLadderPrismHostStyles(host);
+        });
+        ed.addExtensions(
+          defaultCommands(),
+          editHistory(),
+          indentGuides(),
+          matchBrackets(),
+          highlightBracketPairs(),
+          cursorPosition()
+        );
+        ed.textarea?.addEventListener('blur', () => this.applyJson());
+        return ed;
+      };
+
+      const makeReadonly = (host, language, value) => {
+        if(!host) return null;
+        const ed = readonlyEditor(host, { ...common, language, value, readOnly:true }, () => {
+          this.installLadderPrismHostStyles(host);
+        });
+        return ed;
+      };
+
+      this.prismEditors.json = makeEditable(this.$refs.jsonEditorHost, 'json', this.jsonDraft || this.jsonModel, (value) => {
+        if(this.syncingJsonEditor) return;
+        this.jsonDraft = value;
+      });
+      this.prismEditors.angelscript = makeReadonly(this.$refs.angelScriptEditorHost, 'cpp', this.transpile(this.includeAngelScriptTags));
+      this.prismEditors.javascript = makeReadonly(this.$refs.javascriptEditorHost, 'javascript', this.transpileJavaScript());
+      this.prismEditorsReady = true;
+      this.refreshPrismOutputEditors();
+    },
+    installLadderPrismHostStyles(host){
+      const root = host && host.shadowRoot;
+      if(!root || root.querySelector('#pilab-ladder-prism-style')) return;
+      const style = document.createElement('style');
+      style.id = 'pilab-ladder-prism-style';
+      style.textContent = `
+        .prism-code-editor {
+          height: 100%;
+          min-height: 0;
+          background: transparent;
+          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+          font-size: 12px;
+          line-height: 1.55;
+        }
+        .prism-code-editor textarea {
+          outline: none;
+          caret-color: #67e8f9;
+        }
+        .prism-code-editor .active-line {
+          background: rgba(14, 165, 233, .08);
+        }
+      `;
+      root.appendChild(style);
+    },
+    refreshPrismOutputEditors(){
+      if(!this.prismEditorsReady) return;
+      const jsonValue = this.jsonModel;
+      if(this.prismEditors.json && this.prismEditors.json.value !== jsonValue){
+        this.syncingJsonEditor = true;
+        this.prismEditors.json.setOptions({ value: jsonValue });
+        this.syncingJsonEditor = false;
+      }
+      this.prismEditors.angelscript?.setOptions({ value:this.transpile(this.includeAngelScriptTags) });
+      this.prismEditors.javascript?.setOptions({ value:this.transpileJavaScript() });
+    },
+    destroyPrismOutputEditors(){
+      for(const key of ['json','angelscript','javascript']){
+        try{ this.prismEditors?.[key]?.remove?.(); } catch(_){}
+      }
+      this.prismEditors = { json:null, angelscript:null, javascript:null };
+      this.prismEditorsReady = false;
+    },
     show(m){ this.toast=m; setTimeout(()=>this.toast='',1500); },
     panelOpen(name){ return !this.collapsedPanels[name]; },
     togglePanel(name){ this.collapsedPanels[name] = !this.collapsedPanels[name]; },
@@ -1509,4 +1626,24 @@ export default {
   .scrollbar::-webkit-scrollbar { width:10px; height:10px; }
   .scrollbar::-webkit-scrollbar-thumb { background:#334155; border-radius:999px; }
   .scrollbar::-webkit-scrollbar-track { background:#020617; }
+  .code-editor-host {
+    display:grid;
+    height:100%;
+    min-height:0;
+    overflow:hidden;
+  }
+  .ladder-code-editor {
+    background:rgba(2,6,23,.42);
+  }
+  .ladder-code-editor.with-note {
+    height:calc(100% - 76px);
+    margin:1rem;
+    margin-top:.75rem;
+    border:1px solid rgba(51,65,85,.9);
+    border-radius:.75rem;
+    overflow:hidden;
+  }
+  .ladder-json-editor {
+    height:100%;
+  }
 </style>
