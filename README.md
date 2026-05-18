@@ -27,6 +27,14 @@ https://openpilab.github.io/pilab-esp32-p4-plc/experimental/ladder/pilab_ladder_
 
 No installation required.
 
+---
+###  Web flasher for ESP32-P4
+
+Only this specific Waveshare board has been tested
+https://www.amazon.ca/dp/B0F2MP483W
+
+https://openpilab.github.io/pilab-esp32-p4-plc/webflasher/
+
 ### Current Status
 
 This editor is still experimental but already supports:
