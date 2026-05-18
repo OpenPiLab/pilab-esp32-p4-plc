@@ -164,13 +164,16 @@ static char* alloc_script_buffer_psram(size_t len)
 // -----------------------------------------------------------------------------
 // Important: These variables are NOT owned by ScriptProgram. Every compiled
 // engine registers its global properties to these same addresses, so hot-reload
-// does not zero I/Q/AI/AO memory. Physical I/O remains in plc_io.cpp; this is
+// does not zero I/Q memory. Physical I/O remains in plc_io.cpp; this is
 // the script-facing mirror copied at scan boundaries.
+//
+// Analog AI/AO globals were intentionally removed from the script-visible
+// process image because the current PLC hardware does not expose real onboard
+// analog I/O. Descriptive user tags may still be created through the Tag
+// Registry when analog-like values are needed.
 struct ScriptIoGlobals {
     bool  I[PLC_DI_COUNT] = {};
     bool  Q[PLC_DO_COUNT] = {};
-    float AI[PLC_AI_COUNT] = {};
-    float AO[PLC_AO_COUNT] = {};
 };
 
 static ScriptIoGlobals g_script_io;
@@ -180,9 +183,6 @@ static void sync_inputs_to_script_globals()
     for (uint32_t i = 0; i < PLC_DI_COUNT; ++i) {
         g_script_io.I[i] = plc_io_get_di(i) != 0;
     }
-    for (uint32_t i = 0; i < PLC_AI_COUNT; ++i) {
-        g_script_io.AI[i] = plc_io_get_ai(i);
-    }
 }
 
 static void copy_outputs_from_script_globals()
@@ -190,13 +190,10 @@ static void copy_outputs_from_script_globals()
     for (uint32_t i = 0; i < PLC_DO_COUNT; ++i) {
         plc_io_set_do(i, g_script_io.Q[i] ? 1u : 0u);
     }
-    for (uint32_t i = 0; i < PLC_AO_COUNT; ++i) {
-        plc_io_set_ao(i, g_script_io.AO[i]);
-    }
 }
 
 // Function wrappers remain for backwards compatibility, but new user scripts can
-// directly use globals I0..I15, Q0..Q7, AI0..AI3, AO0..AO3.
+// directly use globals I0..I15 and Q0..Q7.
 static void AS_LogInt_Generic(asIScriptGeneric* gen)
 {
     uint32_t value = gen->GetArgDWord(0);
@@ -483,15 +480,6 @@ public:
             char name[8]; snprintf(name, sizeof(name), "Q%lu", (unsigned long)i);
             if (!register_bool_global(engine, name, &g_script_io.Q[i], errors)) return false;
         }
-        for (uint32_t i = 0; i < PLC_AI_COUNT; ++i) {
-            char name[8]; snprintf(name, sizeof(name), "AI%lu", (unsigned long)i);
-            if (!register_float_global(engine, name, &g_script_io.AI[i], errors)) return false;
-        }
-        for (uint32_t i = 0; i < PLC_AO_COUNT; ++i) {
-            char name[8]; snprintf(name, sizeof(name), "AO%lu", (unsigned long)i);
-            if (!register_float_global(engine, name, &g_script_io.AO[i], errors)) return false;
-        }
-
         if (!register_uint_global(engine, "PLC_DeltaTimeUs", &g_script_delta_time_us, errors)) return false;
         if (!register_const_float_global(engine, "PLC_DeltaTimeMs", &g_script_delta_time_ms, errors)) return false;
         if (!register_const_float_global(engine, "PLC_DeltaTimeSeconds", &g_script_delta_time_s, errors)) return false;

@@ -38,13 +38,13 @@ validateProject(){
           else if(!this.tagIsLegal(raw)) add('error','Illegal tag name',where,'Tag "'+raw+'" is not a valid AngelScript identifier. Use letters, numbers, and underscores, and do not start with a number.');
           else if(reserved.has(raw)) add('error','Reserved tag name',where,'Tag "'+raw+'" is an AngelScript keyword or reserved literal. Rename it before compiling.');
 
-          if(e.type==='OUT') allOuts.push({tag:this.sanitize(raw), raw, rung:ri, where});
+          if(['OUT','SET','RST'].includes(e.type)) allOuts.push({tag:this.sanitize(raw), raw, type:e.type, rung:ri, where});
           if(['TON','TOF','CTU','CTD'].includes(e.type)){
             functionBlocks.push({tag:this.sanitize(raw), raw, type:e.type, preset:e.preset, where});
             if(!(Number(e.preset)>0)) add('error','Invalid preset',where,e.type+' preset must be a positive number.');
             if((e.type==='CTU'||e.type==='CTD') && e.resetTag && !this.normalizeBoolExpression(e.resetTag)) add('error','Invalid reset expression',where,'Counter reset/load expression may only use tags, true/false, !, &&, ||, parentheses, and spaces.');
           }
-          if(e.type==='OUT' && slot < 7) add('warning','Coil before end of rung',where,'Output coils normally belong near the right side of the rung. The transpiler treats coils as non-blocking, but this may be visually confusing.');
+          if(['OUT','SET','RST'].includes(e.type) && slot < 7) add('warning','Coil before end of rung',where,'Coils normally belong near the right side of the rung. The transpiler treats coils as non-blocking, but this may be visually confusing.');
         };
 
         if(!Array.isArray(r.main) || r.main.length!==8){
@@ -88,12 +88,12 @@ validateProject(){
         }
 
         if(elements.length===0) add('warning','Empty rung',rungName,'This rung contains no symbols. It will generate rung logic that is always true, but it has no output.');
-        const outs=elements.filter(x=>x.e.type==='OUT');
+        const outs=elements.filter(x=>['OUT','SET','RST'].includes(x.e.type));
         if(elements.length>0 && outs.length===0) add('warning','Outputless rung',rungName,'This rung has logic but no output coil. It may be unfinished or intended only for function block updates.');
       });
 
       const coilMap=new Map();
-      for(const o of allOuts){
+      for(const o of allOuts.filter(x=>x.type==='OUT')){
         if(!coilMap.has(o.tag)) coilMap.set(o.tag,[]);
         coilMap.get(o.tag).push(o);
       }

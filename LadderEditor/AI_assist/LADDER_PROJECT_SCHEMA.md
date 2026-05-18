@@ -22,16 +22,13 @@ schema/pilab-ladder-project.schema.json
 
 Current schema version: **1**
 
-The current implementation uses two validation layers:
-
-1. **JavaScript shape validation** in `src/ladder/ladderSchema.js` checks saved-file shape at import/runtime.
-2. **Editor semantic validation** in `src/ladder/ladderValidation.js` checks PLC/editor meaning.
-
-The machine-readable JSON Schema in `schema/pilab-ladder-project.schema.json` mirrors the saved-file shape for external tooling, tests, and AI validation. The semantic validator protects ladder meaning that JSON Schema cannot fully express.
+The editor also contains a JavaScript shape validator and a semantic validator. The schema protects the file shape. The semantic validator protects editor/PLC meaning.
 
 ---
 
 ## 1. Top-level project object
+
+A project is a JSON object with this basic shape:
 
 ```json
 {
@@ -51,7 +48,7 @@ The machine-readable JSON Schema in `schema/pilab-ladder-project.schema.json` mi
 | `scan_ms` | number | yes | Nominal scan time in milliseconds. Used by timers, counters, generated JavaScript, and the browser simulator. |
 | `rungs` | array | yes | Ordered list of ladder and script rungs. Scan order follows array order. |
 
-Older editor exports may not include `schema` or `schema_version`. The editor may accept those files and normalize them on import.
+Older editor exports may not include `schema` or `schema_version`. The editor accepts those files and normalizes them on import.
 
 ---
 
@@ -66,13 +63,15 @@ rungs[2]
 ...
 ```
 
-A later rung sees tag values written by earlier rungs in the same scan.
+This matters. A later rung sees tag values written by earlier rungs in the same scan.
 
-A project may freely mix ladder and script rungs:
+A project may freely mix:
 
 ```json
 { "kind": "ladder" }
 ```
+
+and:
 
 ```json
 { "kind": "script" }
@@ -106,6 +105,8 @@ This is the most important rule in the format. It makes the saved project behave
 ---
 
 ## 4. Ladder rung
+
+A ladder rung has this shape:
 
 ```json
 {
@@ -147,36 +148,63 @@ Script rungs allow AngelScript-like text logic to live in the same ordered scan 
 | `comment` | string | yes | Human-readable rung comment. May be empty. |
 | `code` | string | yes | Script body emitted inside generated `scan()`. |
 
+### AngelScript export behavior
+
 For AngelScript export, script rung code is passed through directly inside `scan()`.
 
-The browser/Node JavaScript simulator supports a deterministic subset of AngelScript-like statements:
+That means this:
+
+```json
+{
+  "kind": "script",
+  "code": "SpeedCmd = HmiSpeedSetpoint * SpeedTrim;"
+}
+```
+
+is emitted as code inside:
+
+```cpp
+void scan()
+{
+    SpeedCmd = HmiSpeedSetpoint * SpeedTrim;
+}
+```
+
+The generated AngelScript assumes referenced tags/globals exist in the PiLab runtime or in surrounding declarations.
+
+### JavaScript simulator subset
+
+The browser/Node JavaScript simulator supports a practical deterministic subset of AngelScript-like statements. It is **not** a full AngelScript interpreter.
+
+Supported in script rungs by the JavaScript simulator:
 
 ```text
 Assignments:            Tag = expression;
-Compound assignments:   Tag += expression; Tag -= expression; Tag *= expression; Tag /= expression;
-Increment/decrement:    Tag++; Tag--;
+Compound assignments:   Tag += expression;  Tag -= expression;  Tag *= expression;  Tag /= expression;
+Increment/decrement:    Tag++;  Tag--;
 if blocks:              if (...) { ... } else if (...) { ... } else { ... }
 Local variables:        bool/int/uint/float/double/string/auto name = expression;
 Math:                   + - * / %
 Comparisons:            > >= < <= == !=
 Boolean logic:          && || !
 Block reads:            Timer.Q() Timer.ET() Counter.CV()
-Math helpers:           min max abs sqrt sin cos tan atan2 floor ceil round pow exp log
+Math helpers:           min max abs sqrt sin cos tan floor ceil round pow exp log etc.
 ```
 
-Avoid these in simulator-oriented script rungs:
+Limitations of the JavaScript simulator subset:
 
 ```text
-loops
-arrays
-classes
-user-defined functions
-switch/case
-multiline expressions
-arbitrary AngelScript library calls
+No loops
+No user-defined functions
+No arrays/classes/objects
+No switch/case
+No multiline expressions
+No arbitrary AngelScript library calls
 ```
 
 Persistent state should be stored in tags, not local variables. A local variable is recreated every scan.
+
+Good persistent-state example:
 
 ```cpp
 Q_RisingEdge = I0_Input && !I0_Last;
@@ -207,7 +235,27 @@ A branch is a parallel path between two wire nodes.
 | `end` | integer | yes | End wire node, `0` through `8`. Must be greater than `start`. |
 | `cells` | array | yes | Exactly 8 entries. Symbols should only appear from `start` through `end - 1`. |
 
-The schema enumerates valid `start`/`end` combinations, so `end <= start` is rejected by schema validation.
+Example branch from node 0 to node 1:
+
+```json
+{
+  "id": "b_seal",
+  "start": 0,
+  "end": 1,
+  "cells": [
+    { "id": "no_motor", "type": "NO", "tag": "Q0_Motor" },
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+  ]
+}
+```
+
+The schema now enumerates valid `start`/`end` combinations, so `end <= start` is rejected by schema validation.
 
 ---
 
@@ -231,7 +279,7 @@ All ladder symbols share this shape:
 | `preset` | number | required for `TON`, `TOF`, `CTU`, `CTD` | Timer preset in milliseconds or counter preset count. |
 | `resetTag` | string | optional | Canonical counter control Boolean expression. For `CTU` this resets `CV` to `0`; for `CTD` this reloads `CV` from `preset`. |
 
-The current source may also accept legacy/alias counter control fields:
+The current source also accepts legacy/alias counter control fields:
 
 ```text
 resetExpr
@@ -245,6 +293,25 @@ Valid tag names must match:
 
 ```text
 ^[A-Za-z_][A-Za-z0-9_]*$
+```
+
+Valid examples:
+
+```text
+I0
+Q0_Motor
+T_OverTemp
+C_Parts
+RawAI0
+TankLevelPct
+```
+
+Invalid examples:
+
+```text
+0_Start
+Motor Run
+Q-Alarm
 ```
 
 ---
@@ -264,62 +331,7 @@ Valid tag names must match:
 | `CTU` | Count-up counter | Counts rising edges of input power, clamps `CV` at `preset`, sets `.Q()` when `CV >= preset`, and resets to `0` when `resetTag` is true. |
 | `CTD` | Count-down counter | Counts down on rising edges of input power, initializes/reloads `CV` from `preset` when `resetTag` is true, and sets `.Q()` when `CV == 0`. |
 
-### Critical function-block rule
-
-These symbols are stateful function-block instances:
-
-```text
-ONS
-TON
-TOF
-CTU
-CTD
-```
-
-For those types, the `tag` is the instance name, not a normal Boolean tag.
-
-Correct: use the function block inline.
-
-```json
-"main": [
-  { "id": "no_cycle", "type": "NO", "tag": "CycleStart" },
-  { "id": "ton_dwell", "type": "TON", "tag": "T_Dwell", "preset": 500 },
-  { "id": "ctu_batch", "type": "CTU", "tag": "C_Batch", "preset": 10, "resetTag": "ResetBatch" },
-  null,
-  null,
-  null,
-  null,
-  { "id": "out_done", "type": "OUT", "tag": "BatchDone" }
-]
-```
-
-Wrong: do not add an `NO` or `NC` contact with the timer/counter instance name.
-
-```json
-"main": [
-  { "id": "no_cycle", "type": "NO", "tag": "CycleStart" },
-  { "id": "ton_dwell", "type": "TON", "tag": "T_Dwell", "preset": 500 },
-  { "id": "no_t_dwell", "type": "NO", "tag": "T_Dwell" },
-  { "id": "out_done", "type": "OUT", "tag": "Done" },
-  null,
-  null,
-  null,
-  null
-]
-```
-
-Correct script access:
-
-```cpp
-Q_TimerDone = T_Dwell.Q();
-TimerElapsedMs = T_Dwell.ET();
-BatchCount = C_Batch.CV();
-Q_BatchDone = C_Batch.Q();
-```
-
----
-
-## 9. Stored-output blocks
+### Stored-output blocks
 
 The current simulator/transpiler treats these as stored-output blocks for downstream power flow:
 
@@ -329,9 +341,9 @@ CTU
 CTD
 ```
 
-That means their `.Q()` output can continue powering symbols to the right even after left-side input power has dropped.
+That means their `.Q()` output can continue powering symbols to the right even after the left-side input power has dropped.
 
-Example:
+This is important for rungs like:
 
 ```text
 --[ PartSensor ]--[ CTU C_Parts PV 3 ]----------------( BatchDone )
@@ -341,7 +353,7 @@ After `C_Parts.CV >= 3`, `BatchDone` remains on even after `PartSensor` goes fal
 
 ---
 
-## 10. Counter reset/load expressions
+## 9. Counter reset/load expressions
 
 Counter control expressions are intentionally limited to a small Boolean subset:
 
@@ -368,21 +380,15 @@ Example:
 }
 ```
 
-For `CTU`, the expression resets the count to zero. For `CTD`, the expression reloads the count from preset.
+For `CTU`, the expression resets the count to zero.
 
-Using the same counter in its reset expression is allowed when the semantic validator supports it:
-
-```json
-"resetTag": "ResetBatch || C_Batch"
-```
-
-That means reset when `ResetBatch` is true or when `C_Batch.Q()` is true.
+For `CTD`, the expression reloads the count from preset.
 
 ---
 
-## 11. Simulator tag behavior
+## 10. Simulator tag behavior
 
-The simulator supports Boolean, numeric, and string tag values.
+The simulator now supports Boolean, numeric, and string tag values.
 
 The tag table can infer and edit tags discovered from:
 
@@ -404,9 +410,18 @@ empty string       -> false
 other string       -> true
 ```
 
+Numeric tags are useful for script rungs:
+
+```cpp
+ScaledSpeed = HmiSpeedSetpoint * SpeedTrim;
+Q_SpeedHigh = ScaledSpeed >= MaxSpeed;
+```
+
+The simulator UI supports filtering and starred/watch tags so a user can monitor a subset of a large tag list.
+
 ---
 
-## 12. Practical script examples
+## 11. Practical script examples
 
 ### Compare / move / math / clamp
 
@@ -445,51 +460,168 @@ Q_FallingEdge = !I0_Input && I0_Last;
 I0_Last = I0_Input;
 ```
 
+### Script-based CTUD-style counter
+
+```cpp
+if (CUD_Reset) {
+    CUD_Count = 0;
+} else {
+    if (CountUp && !CUD_UpLast) {
+        CUD_Count++;
+    }
+    if (CountDown && !CUD_DownLast && CUD_Count > 0) {
+        CUD_Count--;
+    }
+}
+
+CUD_UpLast = CountUp;
+CUD_DownLast = CountDown;
+CUD_Done = CUD_Count >= CUD_Preset;
+CUD_Empty = CUD_Count == 0;
+```
+
+### Script-based TP pulse timer
+
+```cpp
+if (Trigger && !TrigLast) {
+    PulseActive = true;
+    PulseET_ms = 0;
+}
+
+TrigLast = Trigger;
+
+if (PulseActive) {
+    Q_Pulse = true;
+    PulseET_ms += 5;
+
+    if (PulseET_ms >= 250) {
+        PulseActive = false;
+        Q_Pulse = false;
+    }
+} else {
+    Q_Pulse = false;
+}
+```
+
+The `5` in `PulseET_ms += 5;` should match the project `scan_ms` for a 5 ms scan project.
+
 ---
 
-## 13. Complete example project
+## 12. Complete example project
 
-See:
-
-```text
-examples/mixed_ladder_script_example.json
+```json
+{
+  "schema": "pilab.ladder.project",
+  "schema_version": 1,
+  "name": "Mixed Ladder Script Example",
+  "scan_ms": 5,
+  "rungs": [
+    {
+      "id": "r_motor_latch",
+      "kind": "ladder",
+      "comment": "Start/stop seal-in motor latch",
+      "main": [
+        { "id": "no_start", "type": "NO", "tag": "I0_Start" },
+        null,
+        { "id": "nc_stop", "type": "NC", "tag": "I1_Stop" },
+        null,
+        null,
+        null,
+        null,
+        { "id": "out_motor", "type": "OUT", "tag": "Q0_Motor" }
+      ],
+      "branches": [
+        {
+          "id": "b_seal",
+          "start": 0,
+          "end": 1,
+          "cells": [
+            { "id": "no_motor", "type": "NO", "tag": "Q0_Motor" },
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ]
+        }
+      ]
+    },
+    {
+      "id": "r_batch_counter",
+      "kind": "ladder",
+      "comment": "Count three part-sensor pulses and latch BatchDone through the CTU done output",
+      "main": [
+        { "id": "no_part", "type": "NO", "tag": "PartSensor" },
+        { "id": "ctu_parts", "type": "CTU", "tag": "C_Parts", "preset": 3, "resetTag": "ResetBatch" },
+        null,
+        null,
+        null,
+        null,
+        null,
+        { "id": "out_batch", "type": "OUT", "tag": "BatchDone" }
+      ],
+      "branches": []
+    },
+    {
+      "id": "s_scale_speed",
+      "kind": "script",
+      "comment": "Scale and clamp speed command",
+      "code": "ScaledSpeed = HmiSpeedSetpoint * SpeedTrim;\nSpeedCmd = ScaledSpeed;\nif (SpeedCmd < MinSpeed) {\n    SpeedCmd = MinSpeed;\n}\nif (SpeedCmd > MaxSpeed) {\n    SpeedCmd = MaxSpeed;\n}"
+    }
+  ]
+}
 ```
 
 ---
 
-## 14. AI generation checklist
+## 13. AI generation guidelines
 
-Before returning generated JSON, verify:
+When generating PiLab ladder project JSON:
 
-```text
-[ ] Top-level name, scan_ms, rungs exist.
-[ ] Every ladder rung has kind = "ladder".
-[ ] Every script rung has kind = "script".
-[ ] Every ladder rung has exactly 8 main slots.
-[ ] Every branch has exactly 8 cells.
-[ ] Every branch has end > start.
-[ ] Branch symbols are only in cells[start] through cells[end - 1].
-[ ] Tags are valid identifiers.
-[ ] TON/TOF/CTU/CTD include positive preset.
-[ ] CTU/CTD use resetTag for reset/load behavior.
-[ ] No ordinary NO/NC contact uses a function-block instance tag.
-[ ] Script examples avoid unsupported simulator features unless explicitly targeting AngelScript only.
-```
+1. Always produce valid JSON, not JavaScript object literal syntax.
+2. Use exactly 8 `main` slots for every ladder rung.
+3. Use exactly 8 `cells` entries for every branch.
+4. Use `null` for empty slots.
+5. Use unique `id` values for rungs, branches, and symbols.
+6. Use valid tag names matching `^[A-Za-z_][A-Za-z0-9_]*$`.
+7. Put normal coils near slot 7 unless there is a specific reason not to.
+8. Prefer `resetTag` for counter reset/load control.
+9. Use script rungs for math, scaling, clamping, compact state machines, and logic that would be awkward in visual ladder.
+10. Keep JavaScript-simulator-compatible script rungs inside the documented subset if the user needs browser simulation.
+11. Store persistent script state in tags, not local variables.
+12. Set `scan_ms` deliberately; timer presets and script pulse examples assume this scan time.
 
 ---
 
-## 15. Validation layers
+## 14. Validation layers
 
-JSON Schema validation checks saved-file shape: required fields, rung kinds, slot counts, symbol types, branch start/end shape, and tag identifier format.
+The project has two validation layers:
 
-Editor semantic validation checks PLC/editor-specific concerns such as duplicate output coils, duplicate timer/counter instances, invalid reset expressions, symbols outside branch spans, suspicious empty branches, complex overlapping branch structures, and outputless rungs. AI-generated projects should also keep `ONS` instance tags unique, even though `ONS` does not require a preset.
+1. **JSON Schema validation** checks saved-file shape: required fields, rung kinds, slot counts, symbol types, branch start/end shape, and tag identifier format.
+2. **Editor semantic validation** checks PLC/editor-specific concerns: duplicate coils, duplicate function-block instances, invalid reset expressions, symbols outside branch spans, suspicious empty branches, complex overlapping branch structures, and outputless rungs.
+
+The schema protects the file format. The semantic validator protects ladder meaning.
 
 ---
 
-## 16. Test commands
+## 15. Test commands
+
+Run all tests:
 
 ```bash
 npm run test
+```
+
+Run tests continuously while editing:
+
+```bash
 npm run test:watch
+```
+
+Build the editor:
+
+```bash
 npm run build
 ```

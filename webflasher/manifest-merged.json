@@ -1,0 +1,16 @@
+{
+  "name": "PiLab PLC Firmware - Merged Image",
+  "version": "0.1.0-test",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-P4",
+      "parts": [
+        {
+          "path": "firmware/pilab-plc-merged.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"scripts":{"dev":"vite --host 0.0.0.0","build":"vite build","preview":"vite preview --host 0.0.0.0"},"dependencies":{"@vitejs/plugin-vue":"latest","vite":"latest","vue":"latest","tailwindcss":"latest","@tailwindcss/vite":"latest","lucide-vue-next":"latest"},"devDependencies":{}}

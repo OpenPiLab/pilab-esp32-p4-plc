@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PiLab PLC ESP32-P4 Web Flasher</title>
+  <meta name="description" content="Browser-based firmware flasher for PiLab PLC ESP32-P4 boards." />
+
+  <!-- ESP Web Tools install button. Requires Chrome/Edge/Brave with Web Serial support. -->
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+
+  <style>
+    :root {
+      --bg: #0f172a;
+      --panel: #111827;
+      --panel2: #1f2937;
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --accent: #38bdf8;
+      --accent2: #22c55e;
+      --danger: #f97316;
+      --border: rgba(255,255,255,0.12);
+      --shadow: 0 24px 80px rgba(0,0,0,0.35);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(56,189,248,0.22), transparent 34rem),
+        radial-gradient(circle at bottom right, rgba(34,197,94,0.18), transparent 32rem),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    .wrap {
+      width: min(1050px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 48px 0;
+    }
+
+    header {
+      display: grid;
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      width: fit-content;
+      padding: 7px 12px;
+      border: 1px solid rgba(56,189,248,0.35);
+      border-radius: 999px;
+      color: #bae6fd;
+      background: rgba(14,165,233,0.12);
+      font-size: 0.9rem;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2rem, 5vw, 4rem);
+      line-height: 1.05;
+      letter-spacing: -0.04em;
+    }
+
+    .lead {
+      max-width: 740px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 1.15rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 22px;
+      align-items: start;
+    }
+
+    .card {
+      background: linear-gradient(180deg, rgba(31,41,55,0.88), rgba(17,24,39,0.92));
+      border: 1px solid var(--border);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      padding: 24px;
+    }
+
+    .install-card {
+      position: relative;
+      overflow: hidden;
+    }
+
+    .install-card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at top right, rgba(56,189,248,0.16), transparent 20rem);
+      pointer-events: none;
+    }
+
+    .install-card > * { position: relative; }
+
+    h2 {
+      margin: 0 0 10px;
+      font-size: 1.35rem;
+      letter-spacing: -0.02em;
+    }
+
+    p { margin: 0 0 14px; }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 22px;
+      align-items: center;
+    }
+
+    button, .link-button {
+      appearance: none;
+      border: 0;
+      border-radius: 14px;
+      padding: 13px 18px;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      transition: transform 0.12s ease, filter 0.12s ease;
+    }
+
+    button:hover, .link-button:hover { transform: translateY(-1px); filter: brightness(1.08); }
+
+    .primary {
+      color: #06202d;
+      background: linear-gradient(135deg, var(--accent), #7dd3fc);
+    }
+
+    .secondary {
+      color: var(--text);
+      background: rgba(255,255,255,0.09);
+      border: 1px solid var(--border);
+    }
+
+    .browser-warning {
+      display: none;
+      margin: 16px 0 0;
+      padding: 12px 14px;
+      border: 1px solid rgba(249,115,22,0.45);
+      border-radius: 14px;
+      color: #fed7aa;
+      background: rgba(249,115,22,0.12);
+    }
+
+    .browser-warning.show { display: block; }
+
+    ol, ul {
+      margin: 12px 0 0;
+      padding-left: 1.3rem;
+      color: var(--muted);
+    }
+
+    li { margin: 8px 0; }
+
+    code {
+      color: #bfdbfe;
+      background: rgba(255,255,255,0.08);
+      padding: 2px 6px;
+      border-radius: 8px;
+    }
+
+    .status {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    .stat {
+      padding: 14px;
+      border-radius: 16px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid var(--border);
+    }
+
+    .stat strong {
+      display: block;
+      color: var(--text);
+      font-size: 0.95rem;
+    }
+
+    .stat span {
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .footer {
+      margin-top: 22px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    @media (max-width: 820px) {
+      .wrap { padding: 28px 0; }
+      .grid { grid-template-columns: 1fr; }
+      .status { grid-template-columns: 1fr; }
+      .card { padding: 19px; border-radius: 20px; }
+    }
+  </style>
+</head>
+
+<body>
+  <main class="wrap">
+    <header>
+      <div class="badge">⚡ ESP32-P4 · PiLab PLC · Browser Flashing</div>
+      <h1>Flash PiLab PLC from your browser</h1>
+      <p class="lead">
+        Install the current PiLab PLC firmware onto an ESP32-P4 board without installing ESP-IDF,
+        Python, a compiler, or esptool locally.
+      </p>
+    </header>
+
+    <section class="grid">
+      <div class="card install-card">
+        <h2>Install firmware</h2>
+        <p>
+          Connect the PiLab PLC ESP32-P4 board over USB. Use a Chromium-based desktop browser such as
+          Chrome, Edge, or Brave. Click the install button and select the board serial port.
+        </p>
+
+        <div class="button-row">
+          <esp-web-install-button manifest="manifest.json">
+            <button class="primary" slot="activate">Install PiLab PLC Firmware</button>
+            <span slot="unsupported">
+              <button class="secondary" disabled>Browser not supported</button>
+            </span>
+            <span slot="not-allowed">
+              <button class="secondary" disabled>HTTPS required</button>
+            </span>
+          </esp-web-install-button>
+
+          <a class="link-button secondary" href="manifest.json" target="_blank" rel="noreferrer">View manifest</a>
+        </div>
+
+        <div id="browserWarning" class="browser-warning">
+          This browser may not support Web Serial. Use Chrome, Edge, or Brave on desktop. GitHub Pages uses HTTPS, which is required.
+        </div>
+
+        <div class="status">
+          <div class="stat">
+            <strong>Chip</strong>
+            <span>ESP32-P4</span>
+          </div>
+          <div class="stat">
+            <strong>Install method</strong>
+            <span>ESP Web Tools</span>
+          </div>
+          <div class="stat">
+            <strong>Firmware</strong>
+            <span>ESP-IDF multi-part image</span>
+          </div>
+        </div>
+      </div>
+
+      <aside class="card">
+        <h2>Before flashing</h2>
+        <ol>
+          <li>Use a USB data cable, not a charge-only cable.</li>
+          <li>Close serial monitors or other programs using the board.</li>
+          <li>If auto-reset fails, hold <code>BOOT</code>, tap <code>RESET</code>, then release <code>BOOT</code>.</li>
+          <li>For a first install, allow erase when prompted.</li>
+        </ol>
+
+        <h2 style="margin-top:24px;">ESP32-P4 note</h2>
+        <p style="color:var(--muted);">
+          ESP32-P4 builds often use a different bootloader offset than older ESP32 examples.
+          This starter app uses the exact ESP-IDF flash offsets from your build output: bootloader at <code>0x2000</code>, partition table at <code>0x8000</code>, OTA data at <code>0x29000</code>, and the app at <code>0x40000</code>.
+        </p>
+      </aside>
+    </section>
+
+    <section class="card" style="margin-top:22px;">
+      <h2>Maintainer notes</h2>
+      <ul>
+        <li>Copy your ESP-IDF build binaries into <code>firmware/</code> using the names listed in <code>manifest.json</code>.</li>
+        <li>Keep <code>manifest.json</code> beside this page when publishing to GitHub Pages.</li>
+        <li>The included manifest is already set up for the offsets shown by your current <code>idf.py flash</code> output.</li>
+      </ul>
+    </section>
+
+    <p class="footer">
+      PiLab PLC Web Flasher starter page. Review and test with your exact ESP32-P4 hardware before public release.
+    </p>
+  </main>
+
+  <script>
+    const supportsWebSerial = 'serial' in navigator;
+    const warning = document.getElementById('browserWarning');
+    if (!supportsWebSerial && warning) {
+      warning.classList.add('show');
+    }
+  </script>
+</body>
+</html>

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openpilab.org/schemas/pilab-ladder-project.schema.json",
   "title": "PiLab Ladder Project",
-  "description": "Saved project format for the PiLab browser-based mixed ladder/script editor. Ladder rungs use a fixed 8-slot / 9-wire-node power-flow model. Projects may mix visual ladder rungs and script rungs in the same ordered scan list. TON, TOF, CTU, CTD, and ONS tags are function-block instance names, not ordinary Boolean tags; place the function block inline when its Q output should drive downstream ladder logic.",
+  "description": "Saved project format for the PiLab browser-based ladder editor. Ladder rungs use a fixed 8-slot / 9-wire-node power-flow model. Projects may mix visual ladder rungs and script rungs in the same ordered scan list.",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -14,7 +14,7 @@
     "schema": {
       "type": "string",
       "const": "pilab.ladder.project",
-      "description": "Optional but recommended project schema identifier. Legacy files may omit this; the editor may normalize it on import."
+      "description": "Optional but recommended project schema identifier. The editor normalizes missing legacy values on import."
     },
     "schema_version": {
       "type": "integer",
@@ -27,16 +27,11 @@
       "minLength": 1,
       "description": "Human-readable project name."
     },
-    "description": {
-      "type": "string",
-      "default": "",
-      "description": "Optional human-readable project description, purpose, notes, and safe-test guidance."
-    },
     "scan_ms": {
       "type": "number",
       "exclusiveMinimum": 0,
       "default": 5,
-      "description": "Nominal PLC/script scan time in milliseconds. Used by generated timer code and the browser/Node simulator."
+      "description": "Nominal PLC/script scan time in milliseconds. Used by generated timer code and the browser simulator."
     },
     "rungs": {
       "type": "array",
@@ -55,7 +50,7 @@
     "booleanExpression": {
       "type": "string",
       "pattern": "^[A-Za-z0-9_!&|()\\s]*$",
-      "description": "Tiny PLC-style Boolean expression subset accepted for counter reset/load controls. Supported tokens are identifiers, true, false, !, &&, ||, parentheses, and whitespace. The editor semantic validator should still reject expressions it cannot safely emit."
+      "description": "Tiny PLC-style Boolean expression subset accepted for counter reset/load controls. The editor semantic validator additionally normalizes identifiers and rejects expressions it cannot safely emit. Supported tokens are identifiers, true, false, !, &&, ||, parentheses, and whitespace."
     },
     "nullableSymbol": {
       "oneOf": [
@@ -89,7 +84,7 @@
         "id": {
           "type": "string",
           "minLength": 1,
-          "description": "Unique symbol identifier within the project."
+          "description": "Unique symbol identifier within the project. Used by the editor UI."
         },
         "type": {
           "type": "string",
@@ -108,8 +103,7 @@
           "description": "Ladder symbol type."
         },
         "tag": {
-          "$ref": "#/$defs/identifier",
-          "description": "For NO/NC/OUT/SET/RST this is a normal tag. For ONS/TON/TOF/CTU/CTD this is a function-block instance name."
+          "$ref": "#/$defs/identifier"
         },
         "preset": {
           "type": "number",
@@ -118,7 +112,7 @@
         },
         "resetTag": {
           "$ref": "#/$defs/booleanExpression",
-          "description": "Canonical counter control expression. For CTU this resets CV to 0; for CTD this reloads CV from preset. Empty string means no reset/load input."
+          "description": "Canonical counter control expression. For CTU this resets CV to 0; for CTD this reloads CV from preset. Empty string is allowed and means no reset/load input."
         },
         "resetExpr": {
           "$ref": "#/$defs/booleanExpression",
@@ -154,6 +148,28 @@
             "required": [
               "preset"
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "CTU",
+                  "CTD"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resetTag": {
+                "$ref": "#/$defs/booleanExpression"
+              }
+            }
           }
         }
       ],
@@ -221,11 +237,7 @@
                 "end": {
                   "const": 1
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -235,11 +247,7 @@
                 "end": {
                   "const": 2
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -249,11 +257,7 @@
                 "end": {
                   "const": 3
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -263,11 +267,7 @@
                 "end": {
                   "const": 4
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -277,11 +277,7 @@
                 "end": {
                   "const": 5
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -291,11 +287,7 @@
                 "end": {
                   "const": 6
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -305,11 +297,7 @@
                 "end": {
                   "const": 7
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -319,11 +307,7 @@
                 "end": {
                   "const": 8
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -333,11 +317,7 @@
                 "end": {
                   "const": 2
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -347,11 +327,7 @@
                 "end": {
                   "const": 3
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -361,11 +337,7 @@
                 "end": {
                   "const": 4
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -375,11 +347,7 @@
                 "end": {
                   "const": 5
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -389,11 +357,7 @@
                 "end": {
                   "const": 6
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -403,11 +367,7 @@
                 "end": {
                   "const": 7
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -417,11 +377,7 @@
                 "end": {
                   "const": 8
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -431,11 +387,7 @@
                 "end": {
                   "const": 3
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -445,11 +397,7 @@
                 "end": {
                   "const": 4
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -459,11 +407,7 @@
                 "end": {
                   "const": 5
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -473,11 +417,7 @@
                 "end": {
                   "const": 6
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -487,11 +427,7 @@
                 "end": {
                   "const": 7
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -501,11 +437,7 @@
                 "end": {
                   "const": 8
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -515,11 +447,7 @@
                 "end": {
                   "const": 4
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -529,11 +457,7 @@
                 "end": {
                   "const": 5
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -543,11 +467,7 @@
                 "end": {
                   "const": 6
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -557,11 +477,7 @@
                 "end": {
                   "const": 7
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -571,11 +487,7 @@
                 "end": {
                   "const": 8
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -585,11 +497,7 @@
                 "end": {
                   "const": 5
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -599,11 +507,7 @@
                 "end": {
                   "const": 6
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -613,11 +517,7 @@
                 "end": {
                   "const": 7
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -627,11 +527,7 @@
                 "end": {
                   "const": 8
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -641,11 +537,7 @@
                 "end": {
                   "const": 6
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -655,11 +547,7 @@
                 "end": {
                   "const": 7
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -669,11 +557,7 @@
                 "end": {
                   "const": 8
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -683,11 +567,7 @@
                 "end": {
                   "const": 7
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -697,11 +577,7 @@
                 "end": {
                   "const": 8
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             },
             {
               "properties": {
@@ -711,11 +587,7 @@
                 "end": {
                   "const": 8
                 }
-              },
-              "required": [
-                "start",
-                "end"
-              ]
+              }
             }
           ]
         }
@@ -752,7 +624,6 @@
         "main",
         "branches"
       ],
-      "description": "A visual ladder rung evaluated in scan order.",
       "properties": {
         "id": {
           "type": "string",
@@ -774,7 +645,37 @@
             "$ref": "#/$defs/branch"
           }
         }
-      }
+      },
+      "examples": [
+        {
+          "id": "r1",
+          "kind": "ladder",
+          "comment": "Start/stop motor latch",
+          "main": [
+            {
+              "id": "no_start",
+              "type": "NO",
+              "tag": "I0_Start"
+            },
+            null,
+            {
+              "id": "nc_stop",
+              "type": "NC",
+              "tag": "I1_Stop"
+            },
+            null,
+            null,
+            null,
+            null,
+            {
+              "id": "out_motor",
+              "type": "OUT",
+              "tag": "Q0_Motor"
+            }
+          ],
+          "branches": []
+        }
+      ]
     },
     "scriptRung": {
       "type": "object",
@@ -785,7 +686,7 @@
         "comment",
         "code"
       ],
-      "description": "Raw script rung emitted inside scan() for AngelScript export. The browser/Node JavaScript simulator supports a deterministic AngelScript-like subset.",
+      "description": "Raw script rung emitted inside scan() for AngelScript export. The browser/Node JavaScript simulator supports a practical deterministic subset of AngelScript-like statements.",
       "properties": {
         "id": {
           "type": "string",
@@ -802,7 +703,15 @@
           "type": "string",
           "description": "Script body emitted inside scan(). Tags referenced here are inferred by the simulator tag table; persistent values should be stored in tags, not local variables."
         }
-      }
+      },
+      "examples": [
+        {
+          "id": "s_scale",
+          "kind": "script",
+          "comment": "Scale and clamp analog value",
+          "code": "float span = RawMax - RawMin;\nif (span > 0.0f) {\n    TankLevelPct = ((RawAI0 - RawMin) * 100.0f) / span;\n}\nTankLevelPct = max(0.0f, min(100.0f, TankLevelPct));"
+        }
+      ]
     },
     "rung": {
       "oneOf": [
@@ -872,24 +781,5 @@
         }
       ]
     }
-  ],
-  "x-ai-generation-rules": [
-    "Generate exactly 8 main slots for each ladder rung.",
-    "Generate exactly 8 cells for each branch.",
-    "Use null for empty slots.",
-    "Use branch start/end wire nodes, not pixel coordinates.",
-    "Only place branch symbols in cells[start] through cells[end - 1].",
-    "Use valid identifier tags matching ^[A-Za-z_][A-Za-z0-9_]*$.",
-    "TON, TOF, CTU, and CTD require a positive preset.",
-    "Prefer resetTag for CTU reset and CTD reload behavior.",
-    "Do not use an NO/NC contact with the same tag as a TON, TOF, CTU, CTD, or ONS instance.",
-    "To use a function-block done/output bit in ladder, place the block inline.",
-    "To use function-block state in script, write T1.Q(), T1.ET(), or C1.CV().",
-    "Keep simulator-oriented script rungs inside the documented JavaScript subset."
-  ],
-  "x-semantic-validation-notes": [
-    "JSON Schema validates file shape, not all ladder meaning.",
-    "The editor semantic validator should catch duplicate coils, duplicate function-block instances, symbols outside branch spans, suspicious empty branches, unsafe reset expressions, and outputless rungs.",
-    "The schema intentionally permits additionalProperties for forward compatibility."
   ]
 }

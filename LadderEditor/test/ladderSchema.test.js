@@ -16,6 +16,9 @@ const schemaPath = path.resolve(__dirname, '../schema/pilab-ladder-project.schem
 const emptySlots = () => Array(8).fill(null);
 const NO = (tag) => ({ id: `no_${tag}`, type: 'NO', tag });
 const OUT = (tag) => ({ id: `out_${tag}`, type: 'OUT', tag });
+const SET = (tag) => ({ id: `set_${tag}`, type: 'SET', tag });
+const RST = (tag) => ({ id: `rst_${tag}`, type: 'RST', tag });
+const ONS = (tag) => ({ id: `ons_${tag}`, type: 'ONS', tag });
 const TON = (tag, preset = 1000) => ({ id: `ton_${tag}`, type: 'TON', tag, preset });
 const CTU = (tag, preset = 10, resetTag = '') => ({ id: `ctu_${tag}`, type: 'CTU', tag, preset, resetTag });
 
@@ -63,6 +66,9 @@ describe('formal ladder JSON schema document', () => {
     const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
     expect(schema.title).toBe('PiLab Ladder Project');
     expect(schema.$defs.symbol.properties.type.enum).toContain('TON');
+    expect(schema.$defs.symbol.properties.type.enum).toContain('SET');
+    expect(schema.$defs.symbol.properties.type.enum).toContain('RST');
+    expect(schema.$defs.symbol.properties.type.enum).toContain('ONS');
     expect(schema.$defs.slotArray8.minItems).toBe(8);
     expect(schema.$defs.slotArray8.maxItems).toBe(8);
   });
@@ -79,6 +85,24 @@ describe('ladder project shape validation', () => {
     addFormalSchemaMetadata(project);
     expect(project.schema).toBe(LADDER_PROJECT_SCHEMA_ID);
     expect(project.schema_version).toBe(LADDER_PROJECT_SCHEMA_VERSION);
+  });
+
+
+  it('accepts SET, RST, and ONS symbols without presets', () => {
+    const main = emptySlots();
+    main[0] = NO('StartPB');
+    main[1] = ONS('ONS_Start');
+    main[6] = SET('RunLatch');
+    main[7] = RST('RunLatch');
+    const project = {
+      schema: LADDER_PROJECT_SCHEMA_ID,
+      schema_version: LADDER_PROJECT_SCHEMA_VERSION,
+      name: 'Latch Symbols',
+      scan_ms: 5,
+      rungs: [{ id: 'r_latch', kind: 'ladder', comment: 'Latch symbols', main, branches: [] }],
+    };
+
+    expect(validateLadderProjectShape(project)).toEqual([]);
   });
 
   it('rejects malformed project roots', () => {

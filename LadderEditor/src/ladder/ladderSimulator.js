@@ -4,6 +4,34 @@ counterControlExpr(el){
       if(!el) return '';
       return String(el.resetTag ?? el.resetExpr ?? el.loadTag ?? el.loadExpr ?? '');
     },
+simCreateJsContext(){
+      return {
+        get: (name) => {
+          const tag=this.sanitize(name);
+          const b=this.simBlocks[tag];
+          return b ? !!b.output : (this.simTags[tag] ?? false);
+        },
+        tag: (name) => this.simTagValue(name),
+        set: (name, value) => { this.simTags[this.sanitize(name)] = value; },
+        ensureBlock: (type, name, preset) => this.simEnsureBlock({ type, tag:name, preset }),
+        block: (name, type=null, preset=undefined) => {
+          const tag=this.sanitize(name);
+          let existing=this.simBlocks[tag];
+          if(!existing && !type) type='TON';
+          if(type) return this.simEnsureBlock({ type, tag, preset });
+          return existing || this.simEnsureBlock({ type:'TON', tag, preset:0 });
+        }
+      };
+    },
+simCompileGeneratedProgram(){
+      const code = this.transpileJavaScript ? this.transpileJavaScript() : '';
+      if(this.simCompiledCode === code && this.simProgram) return this.simProgram;
+      const runnable = code.replace(/export\s+/g, '');
+      const factory = Function(runnable + '\nreturn createPiLabLadderProgram;')();
+      this.simCompiledCode = code;
+      this.simProgram = factory(this.simCreateJsContext());
+      return this.simProgram;
+    },
 simInputTagList(){
       // Tags that should be manually toggleable from the simulator panel.
       // This includes normal symbol tags plus any tags referenced inside
@@ -20,11 +48,16 @@ simInputTagList(){
           }
         }
       }
+      for(const r of (this.project.rungs||[])){
+        if(r.kind === 'script' && this.jsScriptRungTags){
+          for(const t of this.jsScriptRungTags(r.code || '')) tags.add(this.sanitize(t));
+        }
+      }
       for(const k of Object.keys(this.simTags||{})) tags.add(this.sanitize(k));
       return [...tags].filter(t => !(this.simBlocks||{})[t]).sort();
     },
 simEnsureBlock(e){
-      if(!e || !['TON','TOF','CTU','CTD'].includes(e.type)) return null;
+      if(!e || !['TON','TOF','CTU','CTD','ONS'].includes(e.type)) return null;
       const tag=this.sanitize(e.tag);
       const preset=Number(e.preset || (e.type==='TON'||e.type==='TOF' ? 1000 : 10));
       let b=this.simBlocks[tag];
@@ -33,21 +66,133 @@ simEnsureBlock(e){
         if(e.type==='CTD') b.output = b.count===0;
         this.simBlocks[tag]=b;
       }
+      this.simAttachBlockMethods(b);
       b.preset_ms=preset;
       b.preset=preset;
       b.resetExpr=this.counterControlExpr(e).trim();
       if(e.type==='TOF') b.remaining_ms = b.output && !b.input ? Math.max(0, (b.preset_ms||0) - (b.elapsed_ms||0)) : 0;
       return b;
     },
+simAttachBlockMethods(b){
+      if(!b || b.__pilabMethods) return b;
+      b.__pilabMethods = true;
+      b.setPreset = function(p){ this.preset_ms=Number(p||0); this.preset=Number(p||0); if(this.type==='CTD' && this.count === undefined) this.count=this.preset; };
+      b.Q = function(){ return !!this.output; };
+      b.ET = function(){ return this.elapsed_ms || 0; };
+      b.CV = function(){ return this.count || 0; };
+      b.update = function(input, arg=false){
+        input=!!input; this.input=input;
+        if(this.type==='TON'){
+          const scan=Number(arg||0);
+          if(input){ this.elapsed_ms=Math.min((this.elapsed_ms||0)+scan,this.preset_ms||0); this.output=this.elapsed_ms >= (this.preset_ms||0); }
+          else { this.elapsed_ms=0; this.output=false; }
+          this.remaining_ms=Math.max(0,(this.preset_ms||0)-(this.elapsed_ms||0));
+        } else if(this.type==='TOF'){
+          const scan=Number(arg||0);
+          if(input){ this.output=true; this.elapsed_ms=0; this.remaining_ms=0; }
+          else if(this.output){
+            this.elapsed_ms=Math.min((this.elapsed_ms||0)+scan,this.preset_ms||0);
+            this.remaining_ms=Math.max(0,(this.preset_ms||0)-(this.elapsed_ms||0));
+            if(this.elapsed_ms >= (this.preset_ms||0)){ this.output=false; this.elapsed_ms=this.preset_ms||0; this.remaining_ms=0; }
+          } else { this.elapsed_ms=this.preset_ms||0; this.remaining_ms=0; }
+        } else if(this.type==='CTU'){
+          const reset=!!arg;
+          if(reset){ this.count=0; this.output=false; this.last=input; return; }
+          if(input && !this.last && (this.count||0) < (this.preset||0)) this.count=(this.count||0)+1;
+          this.last=input; this.output=(this.count||0) >= (this.preset||0);
+        } else if(this.type==='CTD'){
+          const load=!!arg;
+          if(load){ this.count=this.preset||0; this.output=false; this.last=input; return; }
+          if(input && !this.last && (this.count||0)>0) this.count--;
+          this.last=input; this.output=(this.count||0)===0;
+        } else if(this.type==='ONS'){
+          this.output=input && !this.last;
+          this.last=input;
+        }
+      };
+      return b;
+    },
 simBlockFor(e){
-      if(!e || !['TON','TOF','CTU','CTD'].includes(e.type)) return null;
+      if(!e || !['TON','TOF','CTU','CTD','ONS'].includes(e.type)) return null;
       return this.simEnsureBlock(e);
     },
-simTagValue(tag){
+simRawTagValue(tag){
       tag=this.sanitize(tag);
       const b=this.simBlocks[tag];
       if(b) return !!b.output;
-      return !!this.simTags[tag];
+      return (this.simTags && Object.prototype.hasOwnProperty.call(this.simTags, tag)) ? this.simTags[tag] : false;
+    },
+simTagValue(tag){
+      // Ladder contact semantics: booleans are used directly, numbers are false
+      // only when zero/NaN, and strings are false only when empty/false/0.
+      const v=this.simRawTagValue(tag);
+      if(typeof v === 'number') return Number.isFinite(v) && v !== 0;
+      if(typeof v === 'string'){
+        const t=v.trim().toLowerCase();
+        return !(t === '' || t === 'false' || t === '0');
+      }
+      return !!v;
+    },
+simTagBoolValue(tag){
+      return this.simTagValue(tag);
+    },
+simTagType(tag){
+      const v=this.simRawTagValue(tag);
+      if(typeof v === 'number') return 'number';
+      if(typeof v === 'string') return 'string';
+      return 'bool';
+    },
+simTagEditText(tag){
+      const v=this.simRawTagValue(tag);
+      if(typeof v === 'number') return Number.isFinite(v) ? String(v) : '0';
+      if(typeof v === 'string') return v;
+      return v ? 'true' : 'false';
+    },
+isSimTagWatched(tag){
+      tag=this.sanitize(tag);
+      return !!(this.simWatchTags && this.simWatchTags[tag]);
+    },
+toggleSimWatchTag(tag){
+      tag=this.sanitize(tag);
+      if(!tag) return;
+      if(!this.simWatchTags) this.simWatchTags={};
+      if(this.simWatchTags[tag]) delete this.simWatchTags[tag];
+      else this.simWatchTags[tag]=true;
+      this.$forceUpdate();
+    },
+setSimTagType(tag, type){
+      tag=this.sanitize(tag);
+      const current=this.simRawTagValue(tag);
+      if(type === 'number'){
+        const n=Number(current);
+        this.simTags[tag]=Number.isFinite(n) ? n : 0;
+      } else if(type === 'string'){
+        this.simTags[tag]=String(current ?? '');
+      } else {
+        this.simTags[tag]=this.simTagValue(tag);
+      }
+      this.simStep(false);
+    },
+setSimTagFromInput(tag, value){
+      tag=this.sanitize(tag);
+      const type=this.simTagType(tag);
+      if(type === 'number'){
+        const n=Number(value);
+        this.simTags[tag]=Number.isFinite(n) ? n : 0;
+      } else if(type === 'string'){
+        const text=String(value ?? '');
+        const lower=text.trim().toLowerCase();
+        if(lower === 'true') this.simTags[tag]=true;
+        else if(lower === 'false') this.simTags[tag]=false;
+        else {
+          const n=Number(text);
+          this.simTags[tag]=text.trim() !== '' && Number.isFinite(n) ? n : text;
+        }
+      } else {
+        const lower=String(value ?? '').trim().toLowerCase();
+        this.simTags[tag]=!(lower === '' || lower === 'false' || lower === '0' || lower === 'off');
+      }
+      this.simStep(false);
     },
 simEvalBoolExpression(expr){
       const normalized=this.normalizeBoolExpression(expr);
@@ -77,17 +222,54 @@ simReset(){
 toggleSimRun(){
       if(this.simRunning) return this.stopSimRun();
       this.simRunning=true;
-      const run=()=>{ this.simStep(false); };
-      run();
-      this.simTimer=setInterval(run, Math.max(20, Number(this.project.scan_ms||5)));
+
+      // Browser timers are not precise at very small intervals. Many browsers
+      // clamp or coalesce setInterval callbacks, so asking setInterval() to run
+      // every 5 ms can either run much slower than requested or behave
+      // inconsistently under UI load. Keep the UI timer at a relaxed cadence and
+      // use a real-time accumulator to execute as many PLC scans as actually
+      // elapsed. A 5 ms project scan therefore performs about 4 scans if the
+      // browser wakes us up after 20 ms, instead of making the PLC clock run 4x
+      // slow.
+      const scanMs=Math.max(1, Number(this.project.scan_ms||5));
+      const now=()=> (globalThis.performance && typeof globalThis.performance.now==='function') ? globalThis.performance.now() : Date.now();
+      this.simRunLastMs=now();
+      this.simRunAccumMs=0;
+
+      // Do one immediate scan so input changes show up right away when Run is
+      // pressed, then let the accumulator keep simulated time aligned with real
+      // time.
+      this.simStep(false);
+
+      const run=()=>{
+        const t=now();
+        const previous=Number.isFinite(this.simRunLastMs) ? this.simRunLastMs : t;
+        const delta=Math.max(0, t - previous);
+        this.simRunLastMs=t;
+        this.simRunAccumMs=(this.simRunAccumMs || 0) + delta;
+
+        let scans=0;
+        const maxScansPerUiTick=200;
+        while(this.simRunAccumMs >= scanMs && scans < maxScansPerUiTick){
+          this.simStep(false);
+          this.simRunAccumMs -= scanMs;
+          scans++;
+        }
+
+        // If the browser tab was paused for a long time, do not spend seconds
+        // trying to catch up. Drop the excess backlog after a generous cap.
+        if(scans >= maxScansPerUiTick) this.simRunAccumMs=0;
+      };
+
+      this.simTimer=setInterval(run, 20);
     },
-stopSimRun(){ if(this.simTimer) clearInterval(this.simTimer); this.simTimer=null; this.simRunning=false; },
+stopSimRun(){ if(this.simTimer) clearInterval(this.simTimer); this.simTimer=null; this.simRunning=false; this.simRunAccumMs=0; },
 simEvalElement(e){
       if(!e) return true;
       const tag=this.sanitize(e.tag);
       if(e.type==='NO') return this.simTagValue(tag);
       if(e.type==='NC') return !this.simTagValue(tag);
-      if(['TON','TOF','CTU','CTD'].includes(e.type)) return this.simTagValue(tag);
+      if(['TON','TOF','CTU','CTD','ONS'].includes(e.type)) return this.simTagValue(tag);
       return true;
     },
 simEvalSeries(cells,start=0,end=8){
@@ -105,12 +287,12 @@ simEvaluateRungFlow(r){
       for(let pass=0; pass<12; pass++){
         let changed=false;
         for(let i=0;i<8;i++){
-          const on=nodes[i] && this.simEvalElement((r.main||[])[i]);
+          const on=this.simPowerThroughElement(nodes[i], (r.main||[])[i]);
           if(on){ main[i]=true; if(!nodes[i+1]){ nodes[i+1]=true; changed=true; } }
         }
         for(const br of (r.branches||[])){
           if(!br || br.end<=br.start || br.start<0 || br.end>8) continue;
-          const on=nodes[br.start] && this.simEvalSeries(br.cells||[],br.start,br.end);
+          const on=this.simPowerThroughSeries(nodes[br.start], br.cells||[], br.start, br.end);
           if(on){ branch[br.id]=true; if(!nodes[br.end]){ nodes[br.end]=true; changed=true; } }
         }
         if(!changed) break;
@@ -119,17 +301,29 @@ simEvaluateRungFlow(r){
     },
 simInputToMainSlot(r,slot){ return this.simEvaluateRungFlowToNode(r, slot); },
 simInputToBranchSlot(r,br,slot){ return this.simEvaluateRungFlowToNode(r, br.start) && this.simEvalSeries(br.cells||[], br.start, slot); },
+simPowerThroughElement(inputPower, e){
+      if(!e || e.type === 'OUT') return !!inputPower;
+      if(['TOF','CTU','CTD'].includes(e.type)) return this.simEvalElement(e);
+      return !!inputPower && this.simEvalElement(e);
+    },
+simPowerThroughSeries(inputPower, cells, startSlot, endSlot){
+      let power=!!inputPower;
+      for(let i=startSlot; i<endSlot; i++){
+        power=this.simPowerThroughElement(power, (cells||[])[i]);
+      }
+      return power;
+    },
 simEvaluateRungFlowToNode(r,target){
       const nodes=Array(9).fill(false); nodes[0]=true;
       for(let pass=0; pass<12; pass++){
         let changed=false;
         for(let i=0;i<Math.min(8,target);i++){
-          const on=nodes[i] && this.simEvalElement((r.main||[])[i]);
+          const on=this.simPowerThroughElement(nodes[i], (r.main||[])[i]);
           if(on && i+1<=target && !nodes[i+1]){ nodes[i+1]=true; changed=true; }
         }
         for(const br of (r.branches||[])){
           if(!br || br.end<=br.start || br.start<0 || br.end>target) continue;
-          const on=nodes[br.start] && this.simEvalSeries(br.cells||[],br.start,br.end);
+          const on=this.simPowerThroughSeries(nodes[br.start], br.cells||[], br.start, br.end);
           if(on && !nodes[br.end]){ nodes[br.end]=true; changed=true; }
         }
         if(!changed) break;
@@ -174,6 +368,9 @@ simUpdateBlock(e,input){
         if(reset){ b.count=b.preset||0; b.output=false; b.last=!!input; return; }
         if(input && !b.last && (b.count||0)>0) b.count--;
         b.last=!!input; b.output=(b.count||0)===0;
+      } else if(e.type==='ONS'){
+        b.output=!!input && !b.last;
+        b.last=!!input;
       }
     },
 simApplyScriptRung(r){
@@ -192,25 +389,25 @@ simApplyScriptRung(r){
       }
     },
 simStep(showToast=true){
-      // Ensure blocks exist before evaluating, then update each rung in scan order.
+      // Execute the generated JavaScript backend instead of directly updating
+      // simulator state from the ladder JSON. This keeps preview behavior aligned
+      // with the AngelScript backend's emitted scan order.
       for(const e of this.allElements()) this.simEnsureBlock(e);
+      try {
+        const program=this.simCompileGeneratedProgram();
+        program.scan();
+      } catch(e) {
+        console.error('Generated JavaScript simulator failed', e);
+        if(showToast) this.show('Generated JS simulator failed');
+      }
+
+      // Wire highlighting is still computed from the current post-scan tag/block
+      // state so the editor can show energized paths. The actual state update
+      // above comes from the generated JavaScript program.
       const rungStates={};
       for(const r of (this.project.rungs||[])){
-        if(r.kind==='script') { this.simApplyScriptRung(r); continue; }
-        // Update function blocks from the power reaching their input side.
-        for(let slot=0; slot<(r.main||[]).length; slot++){
-          const e=r.main[slot];
-          if(e && ['TON','TOF','CTU','CTD'].includes(e.type)) this.simUpdateBlock(e, this.simInputToMainSlot(r,slot));
-        }
-        for(const br of (r.branches||[])){
-          for(let slot=br.start; slot<br.end; slot++){
-            const e=(br.cells||[])[slot];
-            if(e && ['TON','TOF','CTU','CTD'].includes(e.type)) this.simUpdateBlock(e, this.simInputToBranchSlot(r,br,slot));
-          }
-        }
-        const flow=this.simEvaluateRungFlow(r);
-        rungStates[r.id]=flow;
-        for(const o of this.outputs(r)) this.simTags[this.sanitize(o.tag)] = flow.output;
+        if(r.kind==='script') continue;
+        rungStates[r.id]=this.simEvaluateRungFlow(r);
       }
       this.simRungs=rungStates;
       this.simScanCount++;
@@ -234,11 +431,21 @@ simElementInputPower(r,lane,br,slot){
     },
 simElementTrue(r,lane,br,slot){
       const e=this.simElementObject(r,lane,br,slot);
-      return !!e && this.simEvalElement(e);
+      if(!e) return false;
+      // Output/reset coils are actions, not contact conditions. They show green
+      // only while rung power reaches them. SET is special for display: after it
+      // latches its target tag true, the SET coil should show amber while the
+      // latch is held but this SET instruction is not currently energized. RST
+      // must never show amber because reset is only a momentary action.
+      if(e.type==='OUT' || e.type==='RST') return false;
+      if(e.type==='SET') return this.simTagValue(e.tag);
+      return this.simEvalElement(e);
     },
 simElementPowered(r,lane,br,slot){
       const e=this.simElementObject(r,lane,br,slot);
-      return !!e && this.simElementInputPower(r,lane,br,slot) && this.simEvalElement(e);
+      if(!e) return false;
+      if(['OUT','SET','RST'].includes(e.type)) return this.simElementInputPower(r,lane,br,slot);
+      return this.simElementInputPower(r,lane,br,slot) && this.simEvalElement(e);
     },
 simElementFill(r,lane,br,slot){
       const e=this.simElementObject(r,lane,br,slot);

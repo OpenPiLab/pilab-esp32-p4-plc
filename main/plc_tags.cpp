@@ -1,21 +1,24 @@
 #include "plc_tags.hpp"
+#include "plc_io.hpp"
+#include "plc_filesystem.hpp"
 
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
 #include <angelscript.h>
 
 static const char* TAG = "PLC_TAGS";
-static const char* NVS_NS = "plc_tags";
-static const char* NVS_KEY = "tags_json";
+static const char* TAGS_FILE_PATH = PLC_FS_MOUNT_POINT "/tags/tags.JSON";
+static const char* TAGS_FILE_TMP_PATH = PLC_FS_MOUNT_POINT "/tags/tags.JSON.tmp";
 
 struct RuntimeTag {
     char name[PLC_TAG_NAME_MAX];
@@ -64,7 +67,7 @@ static bool string_to_type(const char* s, PlcTagType* out)
     return false;
 }
 
-static bool is_reserved_name(const char* name)
+static bool is_reserved_word(const char* name)
 {
     if (!name) return true;
     const char* words[] = {
@@ -73,10 +76,82 @@ static bool is_reserved_name(const char* name)
         nullptr
     };
     for (int i = 0; words[i]; ++i) if (strcmp(name, words[i]) == 0) return true;
-
-    if ((name[0] == 'I' || name[0] == 'Q') && isdigit((unsigned char)name[1])) return true;
-    if (name[0] == 'A' && (name[1] == 'I' || name[1] == 'O') && isdigit((unsigned char)name[2])) return true;
     return false;
+}
+
+static bool all_digits(const char* s)
+{
+    if (!s || !*s) return false;
+    while (*s) {
+        if (!isdigit((unsigned char)*s)) return false;
+        ++s;
+    }
+    return true;
+}
+
+static bool is_exact_runtime_io_name(const char* name)
+{
+    if (!name) return false;
+
+    // Reserve only the exact PLC process-image names. Descriptive user tags
+    // such as I0_Motor, I1_Start, and Q0_Motor are intentionally allowed.
+    if ((name[0] == 'I' || name[0] == 'Q') && all_digits(name + 1)) return true;
+    return false;
+}
+
+
+static bool is_legacy_demo_analog_tag_name(const char* name)
+{
+    // Older demo builds created AI0..AI3 and AO0..AO3 as simulated analog
+    // tags. The current PLC has no onboard analog process image, so remove
+    // these exact legacy names during tag-list import / file migration.
+    // Descriptive user tags such as TankLevel, UserAnalog0, or HMI_Setpoint
+    // should be used instead.
+    if (!name) return false;
+    if ((strncmp(name, "AI", 2) == 0 || strncmp(name, "AO", 2) == 0) &&
+        name[2] >= '0' && name[2] <= '3' && name[3] == '\0') {
+        return true;
+    }
+    return false;
+}
+
+static bool is_plc_runtime_system_tag_name(const char* name)
+{
+    // PLC_* is reserved for firmware-provided runtime diagnostics / timing
+    // globals such as PLC_DeltaTimeUs and PLC_ScanOverrunCount. These tags are
+    // returned by GET /api/tags for discoverability, but they are system-owned.
+    return name && strncmp(name, "PLC_", 4) == 0;
+}
+
+static bool is_system_tag_name(const char* name)
+{
+    return is_exact_runtime_io_name(name) || is_plc_runtime_system_tag_name(name);
+}
+
+static bool is_direct_script_runtime_global(const char* name)
+{
+    // These are registered directly by script_engine.cpp against live timing
+    // variables, not through plc_tags_register_angelscript_globals().
+    return name && (
+        strcmp(name, "PLC_DeltaTimeUs") == 0 ||
+        strcmp(name, "PLC_DeltaTimeMs") == 0 ||
+        strcmp(name, "PLC_DeltaTimeSeconds") == 0 ||
+        strcmp(name, "PLC_ScanActualPeriodUs") == 0 ||
+        strcmp(name, "PLC_ScanBudgetUs") == 0
+    );
+}
+
+static bool json_script_visible_for_tag(const RuntimeTag& t)
+{
+    return t.script_visible || is_direct_script_runtime_global(t.name);
+}
+
+static bool should_skip_imported_runtime_tag(const char* name)
+{
+    // /api/tags GET includes read-only runtime/system names so users can
+    // discover them. If that same list is posted back, those system names
+    // should be ignored rather than rejected or persisted in the user tag table.
+    return is_system_tag_name(name) || is_legacy_demo_analog_tag_name(name);
 }
 
 bool plc_tags_is_valid_name(const char* name, char* err, size_t err_len)
@@ -92,7 +167,30 @@ bool plc_tags_is_valid_name(const char* name, char* err, size_t err_len)
             set_err(err, err_len, "Tag name may only contain A-Z, a-z, 0-9, and _"); return false;
         }
     }
-    if (is_reserved_name(name)) { set_err(err, err_len, "Tag name is reserved by the PLC runtime"); return false; }
+    if (is_reserved_word(name)) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Invalid tag '%s': this name is an AngelScript/PLC keyword", name);
+        set_err(err, err_len, msg);
+        return false;
+    }
+    if (is_exact_runtime_io_name(name)) {
+        char msg[240];
+        snprintf(msg, sizeof(msg),
+                 "Invalid tag '%s': exact runtime digital I/O names such as I0 and Q0 are reserved. "
+                 "Use a descriptive user tag such as %s_Motor or HMI_%s instead.",
+                 name, name, name);
+        set_err(err, err_len, msg);
+        return false;
+    }
+    if (is_plc_runtime_system_tag_name(name)) {
+        char msg[240];
+        snprintf(msg, sizeof(msg),
+                 "Invalid tag '%s': names starting with PLC_ are reserved for firmware runtime diagnostics/timing globals. "
+                 "Use a user prefix such as HMI_, M_, or User_ instead.",
+                 name);
+        set_err(err, err_len, msg);
+        return false;
+    }
     set_err(err, err_len, "");
     return true;
 }
@@ -173,23 +271,35 @@ static void add_float_tag_nolock(const char* name, float value, const char* unit
 
 static void ensure_runtime_diagnostic_tags_nolock()
 {
-    add_int_tag_nolock("PLC_ScanCoalescedCount", 0, "scans", "Script scan notifications coalesced/skipped", false, false, true, false);
-    add_int_tag_nolock("PLC_ScanOverrunCount", 0, "scans", "Script scans that exceeded budget", false, false, true, false);
-    add_bool_tag_nolock("PLC_ScanOverrunActive", false, "Script scan is currently over budget");
-    int idx = find_tag_index_nolock("PLC_ScanOverrunActive"); if (idx >= 0) { g_tags[idx].writable = false; g_tags[idx].retentive = false; g_tags[idx].script_visible = false; }
-    add_bool_tag_nolock("PLC_ScanFaultActive", false, "Script scan policy fault active");
-    idx = find_tag_index_nolock("PLC_ScanFaultActive"); if (idx >= 0) { g_tags[idx].writable = false; g_tags[idx].retentive = false; g_tags[idx].script_visible = false; }
-    add_int_tag_nolock("PLC_ScanActualPeriodUs", 0, "us", "Elapsed time between script executions", false, false, true, false);
-    add_int_tag_nolock("PLC_ScanExecutionTimeUs", 0, "us", "Last script scan execution time", false, false, true, false);
-    add_float_tag_nolock("PLC_ScanLoadPercent", 0.0f, "%", "Script execution time divided by budget", false, false, true, false);
-    add_int_tag_nolock("PLC_DeltaTimeUs", 5000, "us", "Clamped elapsed time passed to script", false, false, true, false);
-    add_float_tag_nolock("PLC_DeltaTimeMs", 5.0f, "ms", "Clamped elapsed time passed to script", false, false, true, false);
+    // System/runtime diagnostics. These are visible in the tag list so users can
+    // discover them, but they are firmware-owned and non-retentive.
+    //
+    // Most PLC_Scan* diagnostic values are also registered as AngelScript globals
+    // through the tag registry. A few timing globals are registered directly by
+    // script_engine.cpp against live timing variables; those remain
+    // script_visible=false internally to avoid duplicate RegisterGlobalProperty()
+    // calls, but plc_tags_get_json() reports them as script_visible=true.
+    add_int_tag_nolock("PLC_ScanCoalescedCount", 0, "scans", "System: script scan notifications coalesced/skipped", false, false, true, true);
+    add_int_tag_nolock("PLC_ScanOverrunCount", 0, "scans", "System: script scans that exceeded budget", false, false, true, true);
+    add_bool_tag_nolock("PLC_ScanOverrunActive", false, "System: script scan is currently over budget");
+    int idx = find_tag_index_nolock("PLC_ScanOverrunActive"); if (idx >= 0) { g_tags[idx].writable = false; g_tags[idx].retentive = false; g_tags[idx].script_visible = true; }
+    add_bool_tag_nolock("PLC_ScanFaultActive", false, "System: script scan policy fault active");
+    idx = find_tag_index_nolock("PLC_ScanFaultActive"); if (idx >= 0) { g_tags[idx].writable = false; g_tags[idx].retentive = false; g_tags[idx].script_visible = true; }
+    add_int_tag_nolock("PLC_ScanExecutionTimeUs", 0, "us", "System: last script scan execution time", false, false, true, true);
+    add_float_tag_nolock("PLC_ScanLoadPercent", 0.0f, "%", "System: script execution time divided by budget", false, false, true, true);
+
+    // Direct script globals registered in script_engine.cpp.
+    add_int_tag_nolock("PLC_DeltaTimeUs", 5000, "us", "System: clamped elapsed time passed to script", false, false, true, false);
+    add_float_tag_nolock("PLC_DeltaTimeMs", 5.0f, "ms", "System: clamped elapsed time passed to script", false, false, true, false);
+    add_float_tag_nolock("PLC_DeltaTimeSeconds", 0.005f, "s", "System: clamped elapsed time passed to script", false, false, true, false);
+    add_int_tag_nolock("PLC_ScanActualPeriodUs", 0, "us", "System: elapsed time between script executions", false, false, true, false);
+    add_int_tag_nolock("PLC_ScanBudgetUs", 5000, "us", "System: configured script scan budget", false, false, true, false);
 }
 
 static void ensure_compatibility_tags_nolock()
 {
     // Compatibility/default user bit used by the current HMI examples and test scripts.
-    // Do not overwrite it if the user already defined it in NVS; only add it when missing.
+    // Do not overwrite it if the user already defined it in the tag file; only add it when missing.
     add_bool_tag_nolock("Start", false, "HMI start command bit");
 }
 
@@ -240,64 +350,219 @@ static void json_escape_append(char*& p, size_t& rem, const char* s)
     }
 }
 
+
+static size_t runtime_io_virtual_tag_count()
+{
+    return PLC_DI_COUNT + PLC_DO_COUNT;
+}
+
+static void append_virtual_tag_json(char*& p, size_t& rem, bool& first, const char* name,
+                                    const char* type, bool writable, bool hmi_visible,
+                                    bool script_visible, bool system, const char* desc, const char* units,
+                                    float min_value, float max_value, const char* value_literal)
+{
+    if (rem < 96) return;
+    int n = snprintf(p, rem, "%s{\"name\":\"%s\",\"type\":\"%s\",\"system\":%s,\"writable\":%s,\"retentive\":false,\"hmi_visible\":%s,\"script_visible\":%s,\"description\":\"",
+                     first ? "" : ",", name, type, system ? "true" : "false", writable ? "true" : "false", hmi_visible ? "true" : "false", script_visible ? "true" : "false");
+    p += n; rem = (n < (int)rem) ? rem - n : 0;
+    json_escape_append(p, rem, desc ? desc : "");
+    n = snprintf(p, rem, "\",\"units\":\""); p += n; rem = (n < (int)rem) ? rem - n : 0;
+    json_escape_append(p, rem, units ? units : "");
+    n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%s}", (double)min_value, (double)max_value, value_literal ? value_literal : "false");
+    p += n; rem = (n < (int)rem) ? rem - n : 0;
+    first = false;
+}
+
+static void append_runtime_io_tags_json(char*& p, size_t& rem, bool& first)
+{
+    PlcIoSnapshot snap = {};
+    plc_io_get_snapshot(&snap);
+    char name[12];
+    char desc[80];
+    char value[32];
+
+    for (uint32_t i = 0; i < PLC_DI_COUNT; ++i) {
+        snprintf(name, sizeof(name), "I%lu", (unsigned long)i);
+        snprintf(desc, sizeof(desc), "Physical digital input %s from the PLC process image", name);
+        snprintf(value, sizeof(value), "%s", snap.debounced_di[i] ? "true" : "false");
+        append_virtual_tag_json(p, rem, first, name, "bool", false, true, true, true, desc, "", 0.0f, 1.0f, value);
+    }
+    for (uint32_t i = 0; i < PLC_DO_COUNT; ++i) {
+        snprintf(name, sizeof(name), "Q%lu", (unsigned long)i);
+        snprintf(desc, sizeof(desc), "Physical digital output %s command from the PLC process image", name);
+        snprintf(value, sizeof(value), "%s", snap.do_cmd[i] ? "true" : "false");
+        append_virtual_tag_json(p, rem, first, name, "bool", false, true, true, true, desc, "", 0.0f, 1.0f, value);
+    }
+}
+
 void plc_tags_get_json(char* out, size_t out_len)
 {
     if (!out || !out_len) return;
     out[0] = 0;
     if (!g_tags_mutex) plc_tags_init();
     xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    const size_t reported_count = g_tag_count + runtime_io_virtual_tag_count();
     char* p = out;
     size_t rem = out_len;
-    int n = snprintf(p, rem, "{\"max_count\":%u,\"count\":%u,\"tags\":[", (unsigned)PLC_TAG_MAX_COUNT, (unsigned)g_tag_count);
+    int n = snprintf(p, rem, "{\"max_count\":%u,\"count\":%u,\"tags\":[", (unsigned)PLC_TAG_MAX_COUNT, (unsigned)reported_count);
     p += n; rem = (n < (int)rem) ? rem - n : 0;
+    bool first = true;
     for (size_t i = 0; i < g_tag_count && rem > 64; ++i) {
         RuntimeTag& t = g_tags[i];
-        n = snprintf(p, rem, "%s{\"name\":\"", i ? "," : ""); p += n; rem -= n;
+        n = snprintf(p, rem, "%s{\"name\":\"", first ? "" : ","); p += n; rem = (n < (int)rem) ? rem - n : 0;
         json_escape_append(p, rem, t.name);
-        n = snprintf(p, rem, "\",\"type\":\"%s\",\"writable\":%s,\"retentive\":%s,\"hmi_visible\":%s,\"script_visible\":%s,\"description\":\"",
-                     type_to_string(t.type), t.writable?"true":"false", t.retentive?"true":"false", t.hmi_visible?"true":"false", t.script_visible?"true":"false");
-        p += n; rem -= n;
+        const bool system = is_system_tag_name(t.name);
+        const bool script_visible = json_script_visible_for_tag(t);
+        n = snprintf(p, rem, "\",\"type\":\"%s\",\"system\":%s,\"writable\":%s,\"retentive\":%s,\"hmi_visible\":%s,\"script_visible\":%s,\"description\":\"",
+                     type_to_string(t.type), system?"true":"false", t.writable?"true":"false", t.retentive?"true":"false", t.hmi_visible?"true":"false", script_visible?"true":"false");
+        p += n; rem = (n < (int)rem) ? rem - n : 0;
         json_escape_append(p, rem, t.description);
-        n = snprintf(p, rem, "\",\"units\":\""); p += n; rem -= n;
+        n = snprintf(p, rem, "\",\"units\":\""); p += n; rem = (n < (int)rem) ? rem - n : 0;
         json_escape_append(p, rem, t.units);
         if (t.type == PLC_TAG_BOOL) n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%s}", (double)t.min_value, (double)t.max_value, t.value.b?"true":"false");
         else if (t.type == PLC_TAG_INT) n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%ld}", (double)t.min_value, (double)t.max_value, (long)t.value.i);
         else n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%.6g}", (double)t.min_value, (double)t.max_value, (double)t.value.f);
         p += n; rem = (n < (int)rem) ? rem - n : 0;
+        first = false;
+    }
+    append_runtime_io_tags_json(p, rem, first);
+    if (rem < 3) {
+        xSemaphoreGive(g_tags_mutex);
+        snprintf(out, out_len, "{\"error\":\"tag JSON buffer too small\"}");
+        return;
     }
     snprintf(p, rem, "]}");
     xSemaphoreGive(g_tags_mutex);
 }
 
-static bool save_to_nvs_nolock()
+static bool write_runtime_tag_object_json(char*& p, size_t& rem, const RuntimeTag& t, bool first)
 {
-    char* json = (char*)malloc(8192);
+    if (is_system_tag_name(t.name) || is_legacy_demo_analog_tag_name(t.name)) return true;
+
+    int n = snprintf(p, rem,
+                     "%s{\"name\":\"",
+                     first ? "" : ",");
+    if (n < 0 || (size_t)n >= rem) return false;
+    p += n; rem -= (size_t)n;
+
+    json_escape_append(p, rem, t.name);
+    n = snprintf(p, rem,
+                 "\",\"type\":\"%s\",\"writable\":%s,\"retentive\":%s,\"hmi_visible\":%s,\"script_visible\":%s,\"description\":\"",
+                 type_to_string(t.type),
+                 t.writable ? "true" : "false",
+                 t.retentive ? "true" : "false",
+                 t.hmi_visible ? "true" : "false",
+                 t.script_visible ? "true" : "false");
+    if (n < 0 || (size_t)n >= rem) return false;
+    p += n; rem -= (size_t)n;
+
+    json_escape_append(p, rem, t.description);
+    n = snprintf(p, rem, "\",\"units\":\"");
+    if (n < 0 || (size_t)n >= rem) return false;
+    p += n; rem -= (size_t)n;
+
+    json_escape_append(p, rem, t.units);
+    if (t.type == PLC_TAG_BOOL) {
+        n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%s}",
+                     (double)t.min_value, (double)t.max_value, t.value.b ? "true" : "false");
+    } else if (t.type == PLC_TAG_INT) {
+        n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%ld}",
+                     (double)t.min_value, (double)t.max_value, (long)t.value.i);
+    } else {
+        n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%.6g}",
+                     (double)t.min_value, (double)t.max_value, (double)t.value.f);
+    }
+    if (n < 0 || (size_t)n >= rem) return false;
+    p += n; rem -= (size_t)n;
+    return true;
+}
+
+static bool save_to_tags_file_nolock()
+{
+    const size_t json_cap = 32768;
+    char* json = (char*)malloc(json_cap);
     if (!json) return false;
-    // Avoid recursive mutex use by writing JSON inline using public helper pattern.
-    char* p = json; size_t rem = 8192; int n = snprintf(p, rem, "{\"tags\":["); p += n; rem -= n;
+
+    char* p = json;
+    size_t rem = json_cap;
+    int n = snprintf(p, rem, "{\"tags\":[");
+    if (n < 0 || (size_t)n >= rem) { free(json); return false; }
+    p += n; rem -= (size_t)n;
+
     bool first_saved = true;
-    for (size_t i = 0; i < g_tag_count && rem > 64; ++i) {
+    for (size_t i = 0; i < g_tag_count; ++i) {
         RuntimeTag& t = g_tags[i];
-        if (!t.retentive) continue;
-        n = snprintf(p, rem, "%s{\"name\":\"%s\",\"type\":\"%s\",\"writable\":%s,\"retentive\":%s,\"hmi_visible\":%s,\"script_visible\":%s,\"description\":\"%s\",\"units\":\"%s\",\"min\":%.3f,\"max\":%.3f,",
-                     first_saved ? "" : ",", t.name, type_to_string(t.type), t.writable?"true":"false", t.retentive?"true":"false", t.hmi_visible?"true":"false", t.script_visible?"true":"false", t.description, t.units, (double)t.min_value, (double)t.max_value);
-        p += n; rem -= n;
-        if (t.type == PLC_TAG_BOOL) n = snprintf(p, rem, "\"value\":%s}", t.value.b?"true":"false");
-        else if (t.type == PLC_TAG_INT) n = snprintf(p, rem, "\"value\":%ld}", (long)t.value.i);
-        else n = snprintf(p, rem, "\"value\":%.6g}", (double)t.value.f);
-        p += n; rem -= n;
+        if (is_system_tag_name(t.name) || is_legacy_demo_analog_tag_name(t.name)) continue;
+        if (!write_runtime_tag_object_json(p, rem, t, first_saved)) { free(json); return false; }
         first_saved = false;
     }
-    snprintf(p, rem, "]}");
-    nvs_handle_t h;
-    esp_err_t e = nvs_open(NVS_NS, NVS_READWRITE, &h);
-    if (e == ESP_OK) {
-        e = nvs_set_str(h, NVS_KEY, json);
-        if (e == ESP_OK) e = nvs_commit(h);
-        nvs_close(h);
+
+    if (rem < 3) { free(json); return false; }
+    n = snprintf(p, rem, "]}");
+    if (n < 0 || (size_t)n >= rem) { free(json); return false; }
+
+    // The /tags directory is normally created at boot by plc_filesystem_init().
+    // Try to create it here too so tag save is robust if this module is reused.
+    mkdir(PLC_FS_MOUNT_POINT "/tags", 0775);
+
+    FILE* f = fopen(TAGS_FILE_TMP_PATH, "wb");
+    if (!f) {
+        ESP_LOGE(TAG, "Failed opening %s for write: errno=%d (%s)", TAGS_FILE_TMP_PATH, errno, strerror(errno));
+        free(json);
+        return false;
     }
+
+    const size_t len = strlen(json);
+    bool ok = fwrite(json, 1, len, f) == len;
+    if (ok) ok = fflush(f) == 0;
+    if (ok) {
+        int fd = fileno(f);
+        if (fd >= 0) fsync(fd);
+    }
+    if (fclose(f) != 0) ok = false;
+
+    if (ok) {
+        unlink(TAGS_FILE_PATH);
+        if (rename(TAGS_FILE_TMP_PATH, TAGS_FILE_PATH) != 0) {
+            ESP_LOGE(TAG, "Failed renaming %s to %s: errno=%d (%s)", TAGS_FILE_TMP_PATH, TAGS_FILE_PATH, errno, strerror(errno));
+            ok = false;
+        }
+    }
+
+    if (!ok) unlink(TAGS_FILE_TMP_PATH);
     free(json);
-    return e == ESP_OK;
+    return ok;
+}
+
+static char* read_tags_file(size_t* out_len)
+{
+    if (out_len) *out_len = 0;
+    struct stat st = {};
+    if (stat(TAGS_FILE_PATH, &st) != 0) {
+        if (errno != ENOENT) ESP_LOGW(TAG, "stat failed for %s: errno=%d (%s)", TAGS_FILE_PATH, errno, strerror(errno));
+        return nullptr;
+    }
+    if (st.st_size <= 2 || st.st_size >= 32768) {
+        ESP_LOGW(TAG, "Ignoring %s: invalid size %ld", TAGS_FILE_PATH, (long)st.st_size);
+        return nullptr;
+    }
+    FILE* f = fopen(TAGS_FILE_PATH, "rb");
+    if (!f) {
+        ESP_LOGW(TAG, "Failed opening %s: errno=%d (%s)", TAGS_FILE_PATH, errno, strerror(errno));
+        return nullptr;
+    }
+    char* buf = (char*)malloc((size_t)st.st_size + 1);
+    if (!buf) { fclose(f); return nullptr; }
+    size_t n = fread(buf, 1, (size_t)st.st_size, f);
+    fclose(f);
+    if (n != (size_t)st.st_size) {
+        free(buf);
+        ESP_LOGW(TAG, "Short read from %s", TAGS_FILE_PATH);
+        return nullptr;
+    }
+    buf[n] = 0;
+    if (out_len) *out_len = n;
+    return buf;
 }
 
 static const char* skip_ws(const char* p) { while (p && *p && isspace((unsigned char)*p)) ++p; return p; }
@@ -337,7 +602,7 @@ static float find_float_field(const char* obj, const char* key, float def)
     return strtof(p, nullptr);
 }
 
-bool plc_tags_load_json(const char* json, char* err, size_t err_len)
+static bool plc_tags_load_json_internal(const char* json, bool save_file, char* err, size_t err_len)
 {
     if (!json) { set_err(err, err_len, "No JSON body"); return false; }
     if (!g_tags_mutex) plc_tags_init();
@@ -362,15 +627,27 @@ bool plc_tags_load_json(const char* json, char* err, size_t err_len)
         char name[PLC_TAG_NAME_MAX] = {}; char type_s[16] = {};
         if (!find_string_field(obj, "name", name, sizeof(name))) continue;
         if (!find_string_field(obj, "type", type_s, sizeof(type_s))) continue;
-        char name_err[96];
+        if (should_skip_imported_runtime_tag(name)) {
+            // Runtime/system tags are included in GET /api/tags for discovery,
+            // but they are not user-defined tags. Ignore them when a full tag
+            // list is posted back from the web UI or imported from a bundle.
+            // This also migrates away old demo analog tags AI0..AI3/AO0..AO3
+            // that may still be present in saved tag files from earlier firmware builds.
+            continue;
+        }
+        char name_err[192];
         if (!plc_tags_is_valid_name(name, name_err, sizeof(name_err))) {
-            set_err(err, err_len, name_err);
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Invalid tag '%s': %s", name, name_err);
+            set_err(err, err_len, msg);
             free(new_tags);
             return false;
         }
         PlcTagType type;
         if (!string_to_type(type_s, &type)) {
-            set_err(err, err_len, "Invalid tag type");
+            char msg[192];
+            snprintf(msg, sizeof(msg), "Invalid type '%s' for tag '%s'. Expected bool, int, or float", type_s, name);
+            set_err(err, err_len, msg);
             free(new_tags);
             return false;
         }
@@ -381,7 +658,9 @@ bool plc_tags_load_json(const char* json, char* err, size_t err_len)
         }
         for (size_t i = 0; i < new_count; ++i) {
             if (strcmp(new_tags[i].name, name) == 0) {
-                set_err(err, err_len, "Duplicate tag name");
+                char msg[192];
+                snprintf(msg, sizeof(msg), "Duplicate tag name '%s' in submitted tag registry", name);
+                set_err(err, err_len, msg);
                 free(new_tags);
                 return false;
             }
@@ -407,12 +686,17 @@ bool plc_tags_load_json(const char* json, char* err, size_t err_len)
     memcpy(g_tags, new_tags, PLC_TAG_MAX_COUNT * sizeof(RuntimeTag));
     g_tag_count = new_count;
     ensure_runtime_diagnostic_tags_nolock();
-    bool saved = save_to_nvs_nolock();
+    bool saved = save_file ? save_to_tags_file_nolock() : true;
     xSemaphoreGive(g_tags_mutex);
     free(new_tags);
-    if (!saved) ESP_LOGW(TAG, "Tags updated in RAM but NVS save failed");
-    set_err(err, err_len, saved ? "OK" : "Tags updated in RAM, NVS save failed");
+    if (!saved) ESP_LOGW(TAG, "Tags updated in RAM but LittleFS tag file save failed");
+    set_err(err, err_len, saved ? "OK" : "Tags updated in RAM, LittleFS tag file save failed");
     return true;
+}
+
+bool plc_tags_load_json(const char* json, char* err, size_t err_len)
+{
+    return plc_tags_load_json_internal(json, true, err, err_len);
 }
 
 void plc_tags_init(void)
@@ -422,19 +706,18 @@ void plc_tags_init(void)
     xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
     if (!g_loaded) {
         add_default_tags_nolock();
-        nvs_handle_t h;
-        if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-            size_t len = 0;
-            if (nvs_get_str(h, NVS_KEY, nullptr, &len) == ESP_OK && len > 2 && len < 8192) {
-                char* buf = (char*)malloc(len);
-                if (buf && nvs_get_str(h, NVS_KEY, buf, &len) == ESP_OK) {
-                    xSemaphoreGive(g_tags_mutex);
-                    char err[128]; plc_tags_load_json(buf, err, sizeof(err));
-                    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
-                }
-                free(buf);
+        size_t tags_file_len = 0;
+        char* buf = read_tags_file(&tags_file_len);
+        if (buf) {
+            xSemaphoreGive(g_tags_mutex);
+            char err[160] = {};
+            if (plc_tags_load_json_internal(buf, false, err, sizeof(err))) {
+                ESP_LOGI(TAG, "Loaded tag registry from %s (%u bytes)", TAGS_FILE_PATH, (unsigned)tags_file_len);
+            } else {
+                ESP_LOGW(TAG, "Failed loading tag registry from %s: %s", TAGS_FILE_PATH, err);
             }
-            nvs_close(h);
+            free(buf);
+            xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
         }
         ensure_runtime_diagnostic_tags_nolock();
         ensure_compatibility_tags_nolock();
@@ -517,8 +800,8 @@ bool plc_tags_set_value_bool(const char* name, bool value, char* err, size_t err
     if (!t.writable) { xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "Tag is not writable"); return false; }
     if (t.type != PLC_TAG_BOOL) { xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "Tag is not bool"); return false; }
     t.value.b = value;
-    // Runtime writes must never commit NVS/flash from the HTTP task.
-    // Flash/NVS commits can block long enough to create PLC scan jitter spikes.
+    // Runtime value writes update RAM only. They must never commit LittleFS/flash
+    // from the HTTP task because flash writes can create PLC scan jitter spikes.
     xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "OK"); return true;
 }
 bool plc_tags_set_value_int(const char* name, int32_t value, char* err, size_t err_len)
@@ -531,7 +814,7 @@ bool plc_tags_set_value_int(const char* name, int32_t value, char* err, size_t e
     if (!t.writable) { xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "Tag is not writable"); return false; }
     if (t.type != PLC_TAG_INT) { xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "Tag is not int"); return false; }
     t.value.i = value;
-    // Runtime writes must never commit NVS/flash from the HTTP task.
+    // Runtime value writes update RAM only. They must never commit LittleFS/flash.
     xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "OK"); return true;
 }
 bool plc_tags_set_value_float(const char* name, float value, char* err, size_t err_len)
@@ -544,7 +827,7 @@ bool plc_tags_set_value_float(const char* name, float value, char* err, size_t e
     if (!t.writable) { xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "Tag is not writable"); return false; }
     if (t.type != PLC_TAG_FLOAT) { xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "Tag is not float"); return false; }
     t.value.f = value;
-    // Runtime writes must never commit NVS/flash from the HTTP task.
+    // Runtime value writes update RAM only. They must never commit LittleFS/flash.
     xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "OK"); return true;
 }
 

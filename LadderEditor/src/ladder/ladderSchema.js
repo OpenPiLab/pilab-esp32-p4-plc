@@ -6,7 +6,7 @@ export const LADDER_PROJECT_SCHEMA_ID = 'pilab.ladder.project';
 export const LADDER_PROJECT_SCHEMA_VERSION = 1;
 export const LADDER_SLOT_COUNT = 8;
 export const LADDER_NODE_COUNT = 9;
-export const LADDER_SYMBOL_TYPES = Object.freeze(['NO', 'NC', 'OUT', 'TON', 'TOF', 'CTU', 'CTD']);
+export const LADDER_SYMBOL_TYPES = Object.freeze(['NO', 'NC', 'OUT', 'SET', 'RST', 'ONS', 'TON', 'TOF', 'CTU', 'CTD']);
 export const LADDER_FUNCTION_BLOCK_TYPES = Object.freeze(['TON', 'TOF', 'CTU', 'CTD']);
 export const LADDER_COUNTER_TYPES = Object.freeze(['CTU', 'CTD']);
 

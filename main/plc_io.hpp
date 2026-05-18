@@ -10,7 +10,9 @@ extern "C" {
 
 // ESP32-P4 PLC process image size.
 // AngelScript sees these as integer-tagged arrays, not physical GPIOs.
-#define PLC_DI_COUNT 16
+// Physical onboard DIO is intentionally limited to 8 DI + 8 DO using
+// low-conflict ESP32-P4 Module DEV KIT header GPIOs.
+#define PLC_DI_COUNT 8
 #define PLC_DO_COUNT 8
 #define PLC_AI_COUNT 4
 #define PLC_AO_COUNT 4

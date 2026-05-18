@@ -1353,14 +1353,15 @@ static esp_err_t files_delete_post_handler(httpd_req_t *req)
 
 static esp_err_t api_tags_get_handler(httpd_req_t *req)
 {
-    char *json = (char*)heap_caps_malloc(8192, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!json) json = (char*)heap_caps_malloc(8192, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t json_cap = 32768;
+    char *json = (char*)heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!json) json = (char*)heap_caps_malloc(json_cap, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!json) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_sendstr(req, "Out of memory");
         return ESP_FAIL;
     }
-    plc_tags_get_json(json, 8192);
+    plc_tags_get_json(json, json_cap);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t ret = httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
@@ -1405,7 +1406,7 @@ static esp_err_t api_tags_post_handler(httpd_req_t *req)
     if (!flash_write_allowed(req)) return ESP_OK;
 
     char *body = NULL;
-    if (read_small_json_body(req, &body, 8192) != ESP_OK) return ESP_FAIL;
+    if (read_small_json_body(req, &body, 32768) != ESP_OK) return ESP_FAIL;
 
     char err[160] = {};
     bool ok = plc_tags_load_json(body, err, sizeof(err));

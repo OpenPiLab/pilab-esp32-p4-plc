@@ -44,7 +44,18 @@ rungHeight(r){ return 120 + this.branchLaneCount(r)*78; },
 branchNodes(br){ const out=[]; for(let n=br.start; n<=br.end; n++) out.push(n); return out; },
 branchSlots(br){ const out=[]; for(let s=br.start; s<br.end; s++) out.push(s); return out; },
 createRung(comment=''){ return { id:this.uid(), kind:'ladder', comment, main:Array(8).fill(null), branches:[] }; },
-createScriptRung(comment='AngelScript rung'){ return { id:this.uid(), kind:'script', comment, code:'// Custom AngelScript for this rung. This is emitted inside scan().\n// Example:\n// Q1_Custom = I0 && !I1;' }; },
+createScriptRung(comment='Script Lite rung'){ return { id:this.uid(), kind:'script', comment, code:`// PiLab Script Lite rung.
+// Simulator-safe rules:
+// - one statement per line
+// - use braces for if / else
+// - persistent memory should be stored in tags
+
+if (HMI_Enable) {
+    Q_Debug = true;
+}
+else {
+    Q_Debug = false;
+}` }; },
 createBranch(start,end){ return { id:this.uid(), start, end, cells:Array(8).fill(null) }; },
 cloneRungDeep(r){ const c=JSON.parse(JSON.stringify(r)); const renew=(obj)=>{ if(obj&&typeof obj==='object'){ if(obj.id) obj.id=this.uid(); for(const k in obj) renew(obj[k]); }}; renew(c); return c; },
 newSymbol(t){
@@ -58,6 +69,9 @@ defaultTag(t){
       if(t==='NO') return 'I0';
       if(t==='NC') return 'I1';
       if(t==='OUT') return 'Q0';
+      if(t==='SET') return 'M_Latched';
+      if(t==='RST') return 'M_Latched';
+      if(t==='ONS') return 'ONS_Edge';
       if(t==='TON') return 'T_OnDelay';
       if(t==='TOF') return 'T_OffDelay';
       if(t==='CTU') return 'C_Up';
@@ -74,6 +88,7 @@ normalizeImportedProject(p){
       if(!p || typeof p !== 'object') throw new Error('Project root must be a JSON object.');
       if(!Array.isArray(p.rungs)) throw new Error('Project must contain a rungs array.');
       if(!p.name) p.name = 'Imported PiLab Ladder Project';
+      if(typeof p.description !== 'string') p.description = p.description ? String(p.description) : '';
       if(!p.scan_ms) p.scan_ms = 5;
       addFormalSchemaMetadata(p);
       for(const r of p.rungs){

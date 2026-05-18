@@ -19,47 +19,43 @@ static const char* TAG = "PLC_IO";
 //   Right: GPIO37/TXD, GPIO38/RXD, GPIO22, GPIO5, GPIO4, GPIO1, GPIO36,
 //          GPIO32, GPIO25, GPIO54, GPIO46, GPIO27, GPIO45
 //
-// Fixed PLC allocation used here:
-//   I0..I15  = 16 digital inputs
-//   Q0..Q7   = 8 digital outputs
+// Low-drama PLC allocation used here:
+//   I0..I7 = 8 digital inputs
+//   Q0..Q7 = 8 digital outputs
 //
-// GPIO7/GPIO8 are left free for I2C, GPIO37/GPIO38 are left free for UART,
-// and GPIO0 is left free because it is commonly boot-sensitive on ESP boards.
-// To get 24 fixed I/O points from this 40-pin header while preserving those,
-// Q7 uses GPIO7. If you need I2C, move Q7 to GPIO8 or GPIO0 after checking
-// your board boot behavior.
+// This map intentionally avoids the header pins most likely to collide with
+// onboard peripherals or current troubleshooting issues:
+//   GPIO7/GPIO8   = I2C labels
+//   GPIO24/GPIO25 = USB-related pins
+//   GPIO37/GPIO38 = USB-UART labels
+//   GPIO45/GPIO46 = avoided due to SD-card/control suspicion and observed DO issue
+//   GPIO53        = audio amplifier control
+//
+// GPIO47 and GPIO48 are intentionally left as spare clean-looking GPIOs.
 
 static constexpr bool PLC_INPUT_ACTIVE_LOW = true;
 static constexpr uint8_t PLC_DEBOUNCE_TICKS = 3;     // 3 x 1 ms = 3 ms
 
 static constexpr gpio_num_t k_di_pins[PLC_DI_COUNT] = {
-    GPIO_NUM_23, // I0
-    GPIO_NUM_21, // I1
-    GPIO_NUM_20, // I2
-    GPIO_NUM_6,  // I3
-    GPIO_NUM_3,  // I4
-    GPIO_NUM_2,  // I5
-    GPIO_NUM_24, // I6
-    GPIO_NUM_33, // I7
-    GPIO_NUM_26, // I8
-    GPIO_NUM_48, // I9
-    GPIO_NUM_53, // I10
-    GPIO_NUM_47, // I11
-    GPIO_NUM_22, // I12
-    GPIO_NUM_5,  // I13
-    GPIO_NUM_4,  // I14
-    GPIO_NUM_1,  // I15
+    GPIO_NUM_0,  // I0
+    GPIO_NUM_1,  // I1
+    GPIO_NUM_2,  // I2
+    GPIO_NUM_3,  // I3
+    GPIO_NUM_4,  // I4
+    GPIO_NUM_5,  // I5
+    GPIO_NUM_6,  // I6
+    GPIO_NUM_20, // I7
 };
 
 static constexpr gpio_num_t k_do_pins[PLC_DO_COUNT] = {
-    GPIO_NUM_36, // Q0
-    GPIO_NUM_32, // Q1
-    GPIO_NUM_25, // Q2
-    GPIO_NUM_54, // Q3
-    GPIO_NUM_46, // Q4
-    GPIO_NUM_27, // Q5
-    GPIO_NUM_45, // Q6
-    GPIO_NUM_7,  // Q7 - shared with header SDA label if you later enable I2C
+    GPIO_NUM_21, // Q0
+    GPIO_NUM_22, // Q1
+    GPIO_NUM_23, // Q2
+    GPIO_NUM_26, // Q3
+    GPIO_NUM_27, // Q4
+    GPIO_NUM_32, // Q5
+    GPIO_NUM_33, // Q6
+    GPIO_NUM_54, // Q7
 };
 
 struct PlcIoImage {

@@ -1,0 +1,417 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openpilab.org/schemas/pilab-ladder-project.schema.json",
+  "title": "PiLab Ladder Project",
+  "description": "Saved project format for the PiLab browser-based mixed ladder/script editor. Ladder rungs use a fixed 8-slot / 9-wire-node model. Script rungs are emitted in scan order. IMPORTANT: TON, TOF, CTU, CTD, and ONS tags are function block instance names, not ordinary Boolean tags. Use the function block itself inline when its Q output should drive downstream ladder logic.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "name",
+    "scan_ms",
+    "rungs"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "pilab.ladder.project"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scan_ms": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Nominal PLC/script scan time in milliseconds."
+    },
+    "rungs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/rung"
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "booleanExpression": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_!&|()\\s]+$"
+    },
+    "nullableSymbol": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/symbol"
+        }
+      ]
+    },
+    "slotArray8": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "$ref": "#/$defs/nullableSymbol"
+      }
+    },
+    "symbol": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "type",
+        "tag"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "NO",
+            "NC",
+            "OUT",
+            "SET",
+            "RST",
+            "ONS",
+            "TON",
+            "TOF",
+            "CTU",
+            "CTD"
+          ]
+        },
+        "tag": {
+          "$ref": "#/$defs/identifier",
+          "description": "For NO/NC/OUT/SET/RST this is a tag. For ONS/TON/TOF/CTU/CTD this is a function block instance name. Do not create a separate NO/NC contact with the same tag as a function block instance."
+        },
+        "preset": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "resetTag": {
+          "$ref": "#/$defs/booleanExpression"
+        },
+        "resetExpr": {
+          "$ref": "#/$defs/booleanExpression"
+        },
+        "loadTag": {
+          "$ref": "#/$defs/booleanExpression"
+        },
+        "loadExpr": {
+          "$ref": "#/$defs/booleanExpression"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "TON",
+                  "TOF",
+                  "CTU",
+                  "CTD"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "preset"
+            ]
+          }
+        }
+      ]
+    },
+    "branch": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "start",
+        "end",
+        "cells"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8
+        },
+        "cells": {
+          "$ref": "#/$defs/slotArray8"
+        }
+      },
+      "description": "Branch connects from start wire node to end wire node. end must be greater than start. Symbols should only appear in cells[start] through cells[end - 1].",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "start": {
+                "const": 0
+              }
+            },
+            "required": [
+              "start"
+            ]
+          },
+          "then": {
+            "properties": {
+              "end": {
+                "minimum": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "start": {
+                "const": 1
+              }
+            },
+            "required": [
+              "start"
+            ]
+          },
+          "then": {
+            "properties": {
+              "end": {
+                "minimum": 2
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "start": {
+                "const": 2
+              }
+            },
+            "required": [
+              "start"
+            ]
+          },
+          "then": {
+            "properties": {
+              "end": {
+                "minimum": 3
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "start": {
+                "const": 3
+              }
+            },
+            "required": [
+              "start"
+            ]
+          },
+          "then": {
+            "properties": {
+              "end": {
+                "minimum": 4
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "start": {
+                "const": 4
+              }
+            },
+            "required": [
+              "start"
+            ]
+          },
+          "then": {
+            "properties": {
+              "end": {
+                "minimum": 5
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "start": {
+                "const": 5
+              }
+            },
+            "required": [
+              "start"
+            ]
+          },
+          "then": {
+            "properties": {
+              "end": {
+                "minimum": 6
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "start": {
+                "const": 6
+              }
+            },
+            "required": [
+              "start"
+            ]
+          },
+          "then": {
+            "properties": {
+              "end": {
+                "minimum": 7
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "start": {
+                "const": 7
+              }
+            },
+            "required": [
+              "start"
+            ]
+          },
+          "then": {
+            "properties": {
+              "end": {
+                "minimum": 8
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "start": {
+                "const": 8
+              }
+            },
+            "required": [
+              "start"
+            ]
+          },
+          "then": {
+            "not": {}
+          }
+        }
+      ]
+    },
+    "ladderRung": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "kind",
+        "comment",
+        "main",
+        "branches"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "const": "ladder"
+        },
+        "comment": {
+          "type": "string"
+        },
+        "main": {
+          "$ref": "#/$defs/slotArray8"
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/branch"
+          }
+        }
+      }
+    },
+    "scriptRung": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "kind",
+        "comment",
+        "code"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "const": "script"
+        },
+        "comment": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string",
+          "description": "AngelScript body emitted inside scan(). Browser simulator supports assignments, numeric math, comparisons, Boolean logic, if/else braces, local variables, common Math helpers, and block reads T1.Q(), T1.ET(), C1.CV()."
+        }
+      }
+    },
+    "rung": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ladderRung"
+        },
+        {
+          "$ref": "#/$defs/scriptRung"
+        }
+      ]
+    }
+  },
+  "x-ai-generation-rules": [
+    "Generate exactly 8 main slots for each ladder rung.",
+    "Generate exactly 8 cells for each branch.",
+    "Use branch start/end wire nodes, not pixel coordinates.",
+    "Only place branch symbols in cells[start] through cells[end - 1].",
+    "Do not use an NO/NC contact with the same tag as a TON, TOF, CTU, CTD, or ONS instance.",
+    "To use a function block done/output bit in ladder, place the block inline.",
+    "To use function block state in script, write T1.Q(), T1.ET(), or C1.CV()."
+  ]
+}

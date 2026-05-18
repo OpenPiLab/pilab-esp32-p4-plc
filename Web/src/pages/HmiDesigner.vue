@@ -138,7 +138,7 @@
                         <label class="text-[8px] uppercase text-slate-500">PLC Tag</label>
                         <input v-model="widgets[selectedIndex].props.pin"
                                class="w-full bg-slate-950 border border-slate-800 p-1.5 rounded text-[10px] font-mono"
-                               placeholder="Manual tag, e.g. AI0 or Q6">
+                               placeholder="Manual tag, e.g. TankLevel or Q6">
                         <div class="mt-2 flex gap-2">
                             <input v-model="tagPickerFilter"
                                    class="flex-1 bg-slate-950 border border-slate-800 p-1.5 rounded text-[10px] font-mono"
@@ -290,12 +290,12 @@ import { usePlcStore } from '../stores/plcStore';
         };
 
         const defaults = {
-            gauge:       baseProps({ label: 'AI0', color: '#0ea5e9', pin: 'AI0', min: 0, max: 100, rawMin: 0, rawMax: 1, value: 0, unit: '', decimals: 3 }),
+            gauge:       baseProps({ label: 'TankLevel', color: '#0ea5e9', pin: 'TankLevel', min: 0, max: 100, rawMin: 0, rawMax: 1, value: 0, unit: '', decimals: 3 }),
             readout:     baseProps({ label: 'Q0', color: '#f59e0b', pin: 'Q0', value: 0, unit: '', decimals: 0 }),
-            tank:        baseProps({ label: 'AO0', color: '#22c55e', pin: 'AO0', min: 0, max: 100, rawMin: 0, rawMax: 100, value: 0, unit: '%' }),
+            tank:        baseProps({ label: 'TankCommand', color: '#22c55e', pin: 'TankCommand', min: 0, max: 100, rawMin: 0, rawMax: 100, value: 0, unit: '%' }),
             led:         baseProps({ label: 'Q0', color: '#22c55e', pin: 'Q0', active: false }),
-            trend:       baseProps({ label: 'AO0', color: '#a855f7', pin: 'AO0', min: 0, max: 100, rawMin: 0, rawMax: 100 }),
-            thermometer: baseProps({ label: 'AI1', color: '#f43f5e', pin: 'AI1', min: 0, max: 200, rawMin: 0, rawMax: 1024, value: 0, unit: '°', decimals: 1 }),
+            trend:       baseProps({ label: 'TankCommand', color: '#a855f7', pin: 'TankCommand', min: 0, max: 100, rawMin: 0, rawMax: 100 }),
+            thermometer: baseProps({ label: 'TemperaturePV', color: '#f43f5e', pin: 'TemperaturePV', min: 0, max: 200, rawMin: 0, rawMax: 1024, value: 0, unit: '°', decimals: 1 }),
             toggle:      baseProps({ label: 'HMI_I0', color: '#38bdf8', pin: 'HMI_I0', active: false, writable: true })
         };
 

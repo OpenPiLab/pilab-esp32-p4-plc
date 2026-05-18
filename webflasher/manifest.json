@@ -1,0 +1,28 @@
+{
+  "name": "PiLab PLC Firmware",
+  "version": "0.1.0-test",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-P4",
+      "parts": [
+        {
+          "path": "firmware/bootloader.bin",
+          "offset": 8192
+        },
+        {
+          "path": "firmware/partition-table.bin",
+          "offset": 32768
+        },
+        {
+          "path": "firmware/ota_data_initial.bin",
+          "offset": 167936
+        },
+        {
+          "path": "firmware/P4_PLC_Base.bin",
+          "offset": 262144
+        }
+      ]
+    }
+  ]
+}
