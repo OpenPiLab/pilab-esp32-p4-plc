@@ -35,6 +35,9 @@ https://www.amazon.ca/dp/B0F2MP483W
 
 https://openpilab.github.io/pilab-esp32-p4-plc/webflasher/
 
+See how easy it is to go from a New Board to a PLC in 2 minutes
+https://www.youtube.com/watch?v=g5mR0mprYgU
+
 ### Current Status
 
 This editor is still experimental but already supports:
