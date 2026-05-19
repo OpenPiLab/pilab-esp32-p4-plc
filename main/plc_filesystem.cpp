@@ -82,6 +82,7 @@ esp_err_t plc_filesystem_ensure_standard_dirs(void)
         PLC_FS_MOUNT_POINT "/scripts",
         PLC_FS_MOUNT_POINT "/libs",
         PLC_FS_MOUNT_POINT "/hmi",
+        PLC_FS_MOUNT_POINT "/ladder",
         PLC_FS_MOUNT_POINT "/tags",
         PLC_FS_MOUNT_POINT "/config",
         PLC_FS_MOUNT_POINT "/logs",
