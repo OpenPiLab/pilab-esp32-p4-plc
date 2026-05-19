@@ -124,6 +124,7 @@ import 'prism-code-editor-lightweight/prism/languages/cpp';
 import 'prism-code-editor-lightweight/languages/clike';
 import { getScriptStatus, loadSavedScript, listSavedScripts, uploadScriptText } from '../api/scriptApi';
 import { usePlcStore } from '../stores/plcStore';
+import { ensureTagStoreLoaded, getTagStoreNames, getTagStorePointMap } from '../stores/tagStore';
 import { ANGELSCRIPT_COMPLETIONS, makeTagCompletions, mergeCompletions } from '../editor/angelscriptCompletions';
 
 const SCRIPT_SOURCE_KEY = 'pilab_script_source_v2';
@@ -188,8 +189,10 @@ function installAutocompleteStyles() {
 }
 
 function buildCompletions() {
-  const dynamicTags = makeTagCompletions(store.tagNames.value || [], store.pointsByName.value || {});
-  // Live PLC tags should win over static examples with the same name.
+  const tagNames = new Set([...(getTagStoreNames({ includeSystem: true }) || []), ...(store.tagNames.value || [])]);
+  const pointMap = { ...getTagStorePointMap({ includeSystem: true }), ...(store.pointsByName.value || {}) };
+  const dynamicTags = makeTagCompletions([...tagNames].sort(), pointMap);
+  // Runtime PLC tags override cached registry metadata when both exist.
   return mergeCompletions(dynamicTags, STATIC_COMPLETIONS);
 }
 
@@ -480,6 +483,7 @@ onMounted(() => {
   // Script autocomplete needs the live PLC tag list. Subscribe to the shared
   // PLC data stream while this page is mounted so user-created tags appear
   // beside I/Q/AI/AO completions without adding a second independent poller.
+  ensureTagStoreLoaded().catch(() => {});
   const releasePlcData = store.usePlcData();
   editorCleanup.push(releasePlcData);
   store.refreshPlcData().catch(() => {});

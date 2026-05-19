@@ -1,0 +1,895 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openpilab.org/schemas/pilab-ladder-project.schema.json",
+  "title": "PiLab Ladder Project",
+  "description": "Saved project format for the PiLab browser-based mixed ladder/script editor. Ladder rungs use a fixed 8-slot / 9-wire-node power-flow model. Projects may mix visual ladder rungs and script rungs in the same ordered scan list. TON, TOF, CTU, CTD, and ONS tags are function-block instance names, not ordinary Boolean tags; place the function block inline when its Q output should drive downstream ladder logic.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "name",
+    "scan_ms",
+    "rungs"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "pilab.ladder.project",
+      "description": "Optional but recommended project schema identifier. Legacy files may omit this; the editor may normalize it on import."
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Optional but recommended project schema version. Version 1 is the current formal schema."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable project name."
+    },
+    "description": {
+      "type": "string",
+      "default": "",
+      "description": "Optional human-readable project description, purpose, notes, and safe-test guidance."
+    },
+    "scan_ms": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "default": 5,
+      "description": "Nominal PLC/script scan time in milliseconds. Used by generated timer code and the browser/Node simulator."
+    },
+    "rungs": {
+      "type": "array",
+      "description": "Ordered ladder/script rungs. Scan order follows array order from top to bottom.",
+      "items": {
+        "$ref": "#/$defs/rung"
+      }
+    }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+      "description": "AngelScript-compatible identifier used for tags, function-block instances, and generated JavaScript context names."
+    },
+    "booleanExpression": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_!&|()\\s]*$",
+      "description": "Tiny PLC-style Boolean expression subset accepted for counter reset/load controls. Supported tokens are identifiers, true, false, !, &&, ||, parentheses, and whitespace. The editor semantic validator should still reject expressions it cannot safely emit."
+    },
+    "nullableSymbol": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/symbol"
+        }
+      ]
+    },
+    "slotArray8": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "description": "Exactly 8 ladder slots. Each slot is either null or a symbol object.",
+      "items": {
+        "$ref": "#/$defs/nullableSymbol"
+      }
+    },
+    "symbol": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "type",
+        "tag"
+      ],
+      "description": "One visual ladder instruction/block placed in a main slot or branch cell.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique symbol identifier within the project."
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "NO",
+            "NC",
+            "OUT",
+            "SET",
+            "RST",
+            "ONS",
+            "TON",
+            "TOF",
+            "CTU",
+            "CTD"
+          ],
+          "description": "Ladder symbol type."
+        },
+        "tag": {
+          "$ref": "#/$defs/identifier",
+          "description": "For NO/NC/OUT/SET/RST this is a normal tag. For ONS/TON/TOF/CTU/CTD this is a function-block instance name."
+        },
+        "preset": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Timer preset in milliseconds for TON/TOF, or counter preset count for CTU/CTD. Required for TON, TOF, CTU, and CTD."
+        },
+        "resetTag": {
+          "$ref": "#/$defs/booleanExpression",
+          "description": "Canonical counter control expression. For CTU this resets CV to 0; for CTD this reloads CV from preset. Empty string means no reset/load input."
+        },
+        "resetExpr": {
+          "$ref": "#/$defs/booleanExpression",
+          "description": "Accepted legacy/alias counter reset expression. Prefer resetTag in new files."
+        },
+        "loadTag": {
+          "$ref": "#/$defs/booleanExpression",
+          "description": "Accepted legacy/alias CTD load expression. Prefer resetTag in new files."
+        },
+        "loadExpr": {
+          "$ref": "#/$defs/booleanExpression",
+          "description": "Accepted legacy/alias CTD load expression. Prefer resetTag in new files."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "TON",
+                  "TOF",
+                  "CTU",
+                  "CTD"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "preset"
+            ]
+          }
+        }
+      ],
+      "examples": [
+        {
+          "id": "no_start",
+          "type": "NO",
+          "tag": "I0_Start"
+        },
+        {
+          "id": "ton_delay",
+          "type": "TON",
+          "tag": "T_StartDelay",
+          "preset": 500
+        },
+        {
+          "id": "ctu_parts",
+          "type": "CTU",
+          "tag": "C_Parts",
+          "preset": 3,
+          "resetTag": "ResetPB || !AutoMode"
+        }
+      ]
+    },
+    "branch": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "start",
+        "end",
+        "cells"
+      ],
+      "description": "A parallel branch path between two wire nodes. Symbols should only appear in cells[start] through cells[end - 1].",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Unique branch identifier."
+        },
+        "start": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8,
+          "description": "Start wire node, 0 through 8."
+        },
+        "end": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8,
+          "description": "End wire node, 0 through 8. Must be greater than start."
+        },
+        "cells": {
+          "$ref": "#/$defs/slotArray8"
+        }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "start": {
+                  "const": 0
+                },
+                "end": {
+                  "const": 1
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 0
+                },
+                "end": {
+                  "const": 2
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 0
+                },
+                "end": {
+                  "const": 3
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 0
+                },
+                "end": {
+                  "const": 4
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 0
+                },
+                "end": {
+                  "const": 5
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 0
+                },
+                "end": {
+                  "const": 6
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 0
+                },
+                "end": {
+                  "const": 7
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 0
+                },
+                "end": {
+                  "const": 8
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 1
+                },
+                "end": {
+                  "const": 2
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 1
+                },
+                "end": {
+                  "const": 3
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 1
+                },
+                "end": {
+                  "const": 4
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 1
+                },
+                "end": {
+                  "const": 5
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 1
+                },
+                "end": {
+                  "const": 6
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 1
+                },
+                "end": {
+                  "const": 7
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 1
+                },
+                "end": {
+                  "const": 8
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 2
+                },
+                "end": {
+                  "const": 3
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 2
+                },
+                "end": {
+                  "const": 4
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 2
+                },
+                "end": {
+                  "const": 5
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 2
+                },
+                "end": {
+                  "const": 6
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 2
+                },
+                "end": {
+                  "const": 7
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 2
+                },
+                "end": {
+                  "const": 8
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 3
+                },
+                "end": {
+                  "const": 4
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 3
+                },
+                "end": {
+                  "const": 5
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 3
+                },
+                "end": {
+                  "const": 6
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 3
+                },
+                "end": {
+                  "const": 7
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 3
+                },
+                "end": {
+                  "const": 8
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 4
+                },
+                "end": {
+                  "const": 5
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 4
+                },
+                "end": {
+                  "const": 6
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 4
+                },
+                "end": {
+                  "const": 7
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 4
+                },
+                "end": {
+                  "const": 8
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 5
+                },
+                "end": {
+                  "const": 6
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 5
+                },
+                "end": {
+                  "const": 7
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 5
+                },
+                "end": {
+                  "const": 8
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 6
+                },
+                "end": {
+                  "const": 7
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 6
+                },
+                "end": {
+                  "const": 8
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            },
+            {
+              "properties": {
+                "start": {
+                  "const": 7
+                },
+                "end": {
+                  "const": 8
+                }
+              },
+              "required": [
+                "start",
+                "end"
+              ]
+            }
+          ]
+        }
+      ],
+      "examples": [
+        {
+          "id": "b_seal",
+          "start": 0,
+          "end": 1,
+          "cells": [
+            {
+              "id": "no_run",
+              "type": "NO",
+              "tag": "Q0_Motor"
+            },
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+          ]
+        }
+      ]
+    },
+    "ladderRung": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "kind",
+        "comment",
+        "main",
+        "branches"
+      ],
+      "description": "A visual ladder rung evaluated in scan order.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "const": "ladder"
+        },
+        "comment": {
+          "type": "string",
+          "description": "Human-readable rung comment. May be empty."
+        },
+        "main": {
+          "$ref": "#/$defs/slotArray8"
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/branch"
+          }
+        }
+      }
+    },
+    "scriptRung": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "id",
+        "kind",
+        "comment",
+        "code"
+      ],
+      "description": "Raw script rung emitted inside scan() for AngelScript export. The browser/Node JavaScript simulator supports a deterministic AngelScript-like subset.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "const": "script"
+        },
+        "comment": {
+          "type": "string",
+          "description": "Human-readable rung comment. May be empty."
+        },
+        "code": {
+          "type": "string",
+          "description": "Script body emitted inside scan(). Tags referenced here are inferred by the simulator tag table; persistent values should be stored in tags, not local variables."
+        }
+      }
+    },
+    "rung": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ladderRung"
+        },
+        {
+          "$ref": "#/$defs/scriptRung"
+        }
+      ]
+    }
+  },
+  "examples": [
+    {
+      "schema": "pilab.ladder.project",
+      "schema_version": 1,
+      "name": "Minimal Motor Latch",
+      "scan_ms": 5,
+      "rungs": [
+        {
+          "id": "r_motor",
+          "kind": "ladder",
+          "comment": "Start/stop motor latch",
+          "main": [
+            {
+              "id": "no_start",
+              "type": "NO",
+              "tag": "I0_Start"
+            },
+            null,
+            {
+              "id": "nc_stop",
+              "type": "NC",
+              "tag": "I1_Stop"
+            },
+            null,
+            null,
+            null,
+            null,
+            {
+              "id": "out_motor",
+              "type": "OUT",
+              "tag": "Q0_Motor"
+            }
+          ],
+          "branches": [
+            {
+              "id": "b_seal",
+              "start": 0,
+              "end": 1,
+              "cells": [
+                {
+                  "id": "no_motor",
+                  "type": "NO",
+                  "tag": "Q0_Motor"
+                },
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "x-ai-generation-rules": [
+    "Generate exactly 8 main slots for each ladder rung.",
+    "Generate exactly 8 cells for each branch.",
+    "Use null for empty slots.",
+    "Use branch start/end wire nodes, not pixel coordinates.",
+    "Only place branch symbols in cells[start] through cells[end - 1].",
+    "Use valid identifier tags matching ^[A-Za-z_][A-Za-z0-9_]*$.",
+    "TON, TOF, CTU, and CTD require a positive preset.",
+    "Prefer resetTag for CTU reset and CTD reload behavior.",
+    "Do not use an NO/NC contact with the same tag as a TON, TOF, CTU, CTD, or ONS instance.",
+    "To use a function-block done/output bit in ladder, place the block inline.",
+    "To use function-block state in script, write T1.Q(), T1.ET(), or C1.CV().",
+    "Keep simulator-oriented script rungs inside the documented JavaScript subset."
+  ],
+  "x-semantic-validation-notes": [
+    "JSON Schema validates file shape, not all ladder meaning.",
+    "The editor semantic validator should catch duplicate coils, duplicate function-block instances, symbols outside branch spans, suspicious empty branches, unsafe reset expressions, and outputless rungs.",
+    "The schema intentionally permits additionalProperties for forward compatibility."
+  ]
+}

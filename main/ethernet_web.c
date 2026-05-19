@@ -95,20 +95,26 @@ static const int ETH_RMII_RXD1_GPIO = 30;
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[]   asm("_binary_index_html_end");
 
-extern const uint8_t index_css_start[] asm("_binary_index_css_start");
-extern const uint8_t index_css_end[]   asm("_binary_index_css_end");
+extern const uint8_t index_css_gz_start[] asm("_binary_index_css_gz_start");
+extern const uint8_t index_css_gz_end[]   asm("_binary_index_css_gz_end");
 
-extern const uint8_t app_js_start[] asm("_binary_app_js_start");
-extern const uint8_t app_js_end[]   asm("_binary_app_js_end");
+extern const uint8_t app_js_gz_start[] asm("_binary_app_js_gz_start");
+extern const uint8_t app_js_gz_end[]   asm("_binary_app_js_gz_end");
 
-static esp_err_t send_embedded_chunked(httpd_req_t *req,
-                                       const uint8_t *data,
-                                       size_t len,
-                                       const char *content_type,
-                                       const char *cache_control,
-                                       const char *log_name)
+static esp_err_t send_embedded_chunked_encoded(httpd_req_t *req,
+                                               const uint8_t *data,
+                                               size_t len,
+                                               const char *content_type,
+                                               const char *content_encoding,
+                                               const char *cache_control,
+                                               const char *log_name)
 {
     httpd_resp_set_type(req, content_type);
+
+    if (content_encoding && content_encoding[0]) {
+        httpd_resp_set_hdr(req, "Content-Encoding", content_encoding);
+        httpd_resp_set_hdr(req, "Vary", "Accept-Encoding");
+    }
 
     // Firmware-hosted SPA assets must not be browser-cached during alpha/dev
     // releases. The ESP32-P4 serves fixed filenames like /assets/app.js and
@@ -156,6 +162,24 @@ static esp_err_t send_embedded_chunked(httpd_req_t *req,
     return ret;
 }
 
+static esp_err_t send_embedded_chunked(httpd_req_t *req,
+                                       const uint8_t *data,
+                                       size_t len,
+                                       const char *content_type,
+                                       const char *cache_control,
+                                       const char *log_name)
+{
+    return send_embedded_chunked_encoded(
+        req,
+        data,
+        len,
+        content_type,
+        NULL,
+        cache_control,
+        log_name
+    );
+}
+
 static esp_err_t spa_index_get_handler(httpd_req_t *req)
 {
     return send_embedded_chunked(
@@ -170,25 +194,27 @@ static esp_err_t spa_index_get_handler(httpd_req_t *req)
 
 static esp_err_t spa_css_get_handler(httpd_req_t *req)
 {
-    return send_embedded_chunked(
+    return send_embedded_chunked_encoded(
         req,
-        index_css_start,
-        (size_t)(index_css_end - index_css_start),
+        index_css_gz_start,
+        (size_t)(index_css_gz_end - index_css_gz_start),
         "text/css; charset=utf-8",
+        "gzip",
         "no-store, no-cache, must-revalidate, max-age=0",
-        "Vue SPA index.css"
+        "Vue SPA index.css.gz"
     );
 }
 
 static esp_err_t spa_js_get_handler(httpd_req_t *req)
 {
-    return send_embedded_chunked(
+    return send_embedded_chunked_encoded(
         req,
-        app_js_start,
-        (size_t)(app_js_end - app_js_start),
+        app_js_gz_start,
+        (size_t)(app_js_gz_end - app_js_gz_start),
         "application/javascript; charset=utf-8",
+        "gzip",
         "no-store, no-cache, must-revalidate, max-age=0",
-        "Vue SPA app.js"
+        "Vue SPA app.js.gz"
     );
 }
 

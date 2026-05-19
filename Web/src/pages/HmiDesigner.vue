@@ -219,6 +219,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import { usePlcStore } from '../stores/plcStore';
+import { ensureTagStoreLoaded, getTagStoreNames, getTagStorePointMap } from '../stores/tagStore';
 
 
         const plcStore = usePlcStore();
@@ -281,12 +282,12 @@ import { usePlcStore } from '../stores/plcStore';
 
         const isWritableTag = (tag) => {
             if (!tag) return false;
-            const p = plcPoints.value[tag];
+            const p = plcPoints.value[tag] || getTagStorePointMap({ includeSystem: true })[tag];
             if (!p) return false;
-            // User-created tags are intended to be HMI-writable command/state tags.
+            // User-created / unsaved registry tags are intended to be HMI-writable command/state tags.
             // Physical outputs may also be useful for manual testing, but inputs,
             // analogs, and simulated tags should stay read-only from the HMI.
-            return p.source === 'user' || /^Q[0-7]$/.test(tag);
+            return p.source === 'user' || p.source === 'registry' || p.writable === true || /^Q[0-7]$/.test(tag);
         };
 
         const defaults = {
@@ -301,9 +302,13 @@ import { usePlcStore } from '../stores/plcStore';
 
         const visibleWidgets = computed(() => widgets.value.filter(w => (w.props.page || 'Main') === currentPage.value));
         const alarmCount = computed(() => widgets.value.filter(w => w.props.alarm).length);
+        const combinedTagNames = computed(() => {
+            const names = new Set([...(getTagStoreNames({ includeSystem: true }) || []), ...(tagNames.value || [])]);
+            return [...names].sort((a, b) => a.localeCompare(b));
+        });
         const filteredTagNames = computed(() => {
             const q = String(tagPickerFilter.value || '').trim().toLowerCase();
-            const list = q ? tagNames.value.filter(t => t.toLowerCase().includes(q)) : tagNames.value;
+            const list = q ? combinedTagNames.value.filter(t => t.toLowerCase().includes(q)) : combinedTagNames.value;
             return list.slice(0, 80);
         });
 
@@ -321,9 +326,10 @@ import { usePlcStore } from '../stores/plcStore';
             tagPickerFilter.value = tag;
         };
         const tagValueText = (tag) => {
-            const p = plcPoints.value[tag];
+            const p = plcPoints.value[tag] || getTagStorePointMap({ includeSystem: true })[tag];
             if (!p) return '';
             const v = p.value;
+            if (v === undefined) return p.source === 'registry' ? 'unsaved registry' : '';
             if (typeof v === 'number') return String(Number(v.toFixed ? v.toFixed(3) : v));
             return String(v);
         };
@@ -633,6 +639,7 @@ import { usePlcStore } from '../stores/plcStore';
         watch(widgets, scheduleLayoutSave, { deep: true });
 
         onMounted(() => {
+            ensureTagStoreLoaded().catch(() => {});
             const loaded = loadLayoutLocal();
             if (!loaded) seedDefaultLayout();
             selectedIndex.value = null;

@@ -20,21 +20,19 @@ export default defineConfig({
     outDir: 'dist',
     assetsDir: 'assets',
 
-    // Prevent CSS splitting
+    // Emit a single CSS file for the firmware web bundle.
     cssCodeSplit: false,
 
-    // Make output filenames stable and reduce chunk count
     rollupOptions: {
       output: {
-        codeSplitting: false,
+        // Rollup does not support the old `codeSplitting: false` option here.
+        // This is the correct setting that forces dynamic imports into one JS bundle.
+        inlineDynamicImports: true,
 
-        // Single JS bundle
+        // Stable firmware-friendly output names.
         entryFileNames: 'assets/app.js',
+        chunkFileNames: 'assets/app.js',
 
-        // Any remaining chunks
-        chunkFileNames: 'assets/[name].js',
-
-        // CSS and other assets
         assetFileNames: (assetInfo) => {
           if (assetInfo.name && assetInfo.name.endsWith('.css')) {
             return 'assets/index.css';

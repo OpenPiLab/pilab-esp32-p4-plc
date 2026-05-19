@@ -13,6 +13,7 @@
           <RouterLink to="/">Command</RouterLink>
           <RouterLink to="/script">Script</RouterLink>
           <RouterLink to="/hmi">HMI</RouterLink>
+          <RouterLink to="/ladder">Ladder</RouterLink>
           <RouterLink to="/tags">Tags</RouterLink>
           <RouterLink to="/files">Files</RouterLink>
           <RouterLink to="/settings" class="app-settings-link" title="Settings" aria-label="Settings">⚙</RouterLink>
@@ -24,9 +25,26 @@
 </template>
 
 <script setup>
-import { onMounted } from 'vue';
+import { onBeforeUnmount, onMounted } from 'vue';
 import { usePlcStore } from '../stores/plcStore';
+import { ensureTagStoreLoaded, useTagStore } from '../stores/tagStore';
 import UnifiedStatusBar from './UnifiedStatusBar.vue';
 const plcStore = usePlcStore();
-onMounted(() => plcStore.start());
+const tagStore = useTagStore();
+function beforeUnloadTagGuard(e) {
+  if (!tagStore.dirty) return;
+  e.preventDefault();
+  e.returnValue = '';
+}
+onMounted(() => {
+  plcStore.start();
+  // Prime the app-wide tag registry once. This keeps Tags/Ladder/Script/HMI
+  // from each owning separate first-load behavior, while explicit Reload on
+  // the Tags page can still force a fresh /api/tags read.
+  ensureTagStoreLoaded().catch(() => {});
+  window.addEventListener('beforeunload', beforeUnloadTagGuard);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', beforeUnloadTagGuard);
+});
 </script>
