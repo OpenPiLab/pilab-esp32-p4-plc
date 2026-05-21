@@ -505,8 +505,6 @@ Main software stack:
 
 ## Waveshare PiLab Digital Input Output Pinout
 
-Live PLC status, scan timing, memory, script state, digital I/O, run/stop control, and system pulse history.
-
 ![PiLab PLC 40 Pin Connector Layout](schematic/PiLabPLC_Pinout_Mapping.png)
 
 ---
