@@ -33,17 +33,20 @@
       </section>
 
       <aside class="script-side">
-        <section class="script-panel panel rounded-md script-library-panel">
-          <div class="script-panel-head">
+        <section class="script-panel panel rounded-md script-library-panel" :class="{ collapsed: !panelOpen('library') }">
+          <div class="script-panel-head script-panel-toggle" @click="togglePanel('library')">
             <div>Saved Scripts</div>
-            <div class="script-library-actions">
-              <button class="script-clear-log" :disabled="scriptsLoading" @click="refreshScriptLibrary">Refresh</button>
-              <button class="script-clear-log" :disabled="!selectedScriptPath || scriptDownloadBusy" @click="downloadSelectedScript">
-                {{ scriptDownloadBusy ? 'Loading' : 'Download' }}
-              </button>
+            <div class="script-panel-head-actions" @click.stop>
+              <div v-show="panelOpen('library')" class="script-library-actions">
+                <button class="script-clear-log" :disabled="scriptsLoading" @click="refreshScriptLibrary">Refresh</button>
+                <button class="script-clear-log" :disabled="!selectedScriptPath || scriptDownloadBusy" @click="downloadSelectedScript">
+                  {{ scriptDownloadBusy ? 'Loading' : 'Download' }}
+                </button>
+              </div>
+              <span class="script-collapse-mark" @click.stop="togglePanel('library')">{{ panelOpen('library') ? '−' : '+' }}</span>
             </div>
           </div>
-          <div class="script-library-body">
+          <div v-show="panelOpen('library')" class="script-library-body">
             <button
               v-for="file in scriptFiles"
               :key="file.path"
@@ -60,14 +63,17 @@
           </div>
         </section>
 
-        <section class="script-panel panel rounded-md">
-          <div class="script-panel-head">
+        <section class="script-panel panel rounded-md" :class="{ collapsed: !panelOpen('diagnostics') }">
+          <div class="script-panel-head script-panel-toggle" @click="togglePanel('diagnostics')">
             <div>Diagnostics</div>
-            <div class="script-count" :class="diagnostics.errors.length ? 'bad-text' : 'ok-text'">
-              {{ diagnostics.errors.length }} ERR / {{ diagnostics.warnings.length }} WARN
+            <div class="script-panel-head-actions">
+              <div class="script-count" :class="diagnostics.errors.length ? 'bad-text' : 'ok-text'">
+                {{ diagnostics.errors.length }} ERR / {{ diagnostics.warnings.length }} WARN
+              </div>
+              <span class="script-collapse-mark">{{ panelOpen('diagnostics') ? '−' : '+' }}</span>
             </div>
           </div>
-          <div class="script-diagnostics">
+          <div v-show="panelOpen('diagnostics')" class="script-diagnostics">
             <button
               v-for="item in diagnosticItems"
               :key="item.kind + ':' + item.line + ':' + item.col + ':' + item.msg"
@@ -82,12 +88,15 @@
           </div>
         </section>
 
-        <section class="script-panel panel rounded-md">
-          <div class="script-panel-head">
+        <section class="script-panel panel rounded-md" :class="{ collapsed: !panelOpen('console') }">
+          <div class="script-panel-head script-panel-toggle" @click="togglePanel('console')">
             <div>Console</div>
-            <button class="script-clear-log" @click="events = []">Clear</button>
+            <div class="script-panel-head-actions" @click.stop>
+              <button v-show="panelOpen('console')" class="script-clear-log" @click="events = []">Clear</button>
+              <span class="script-collapse-mark" @click.stop="togglePanel('console')">{{ panelOpen('console') ? '−' : '+' }}</span>
+            </div>
           </div>
-          <div class="script-log lcd">
+          <div v-show="panelOpen('console')" class="script-log lcd">
             <div v-for="e in events" :key="e.id" class="script-log-line" :class="e.tone">
               <span>[{{ e.time }}]</span> {{ e.msg }}
             </div>
@@ -95,9 +104,12 @@
           </div>
         </section>
 
-        <section class="script-panel panel rounded-md hide-lg">
-          <div class="script-panel-head"><div>Shortcuts</div></div>
-          <div class="script-help">
+        <section class="script-panel panel rounded-md hide-lg" :class="{ collapsed: !panelOpen('shortcuts') }">
+          <div class="script-panel-head script-panel-toggle" @click="togglePanel('shortcuts')">
+            <div>Shortcuts</div>
+            <span class="script-collapse-mark">{{ panelOpen('shortcuts') ? '−' : '+' }}</span>
+          </div>
+          <div v-show="panelOpen('shortcuts')" class="script-help">
             <div><b>Ctrl+S</b> upload script</div>
             <div><b>Ctrl+B</b> upload script</div>
             <div><b>Ctrl+Enter</b> refresh status</div>
@@ -174,6 +186,7 @@ const scriptName = ref(localStorage.getItem(SCRIPT_NAME_KEY) || 'main.as');
 const status = ref({});
 const events = ref([]);
 const diagnostics = ref({ errors: [], warnings: [] });
+const collapsedPanels = ref({ library: false, diagnostics: false, console: false, shortcuts: false });
 const savedSource = localStorage.getItem(SCRIPT_SOURCE_KEY) || DEFAULT_SCRIPT;
 const store = usePlcStore();
 
@@ -247,6 +260,12 @@ function addLog(msg, tone = '') {
   events.value.unshift({ id: ++eventId, time: nowText(), msg, tone });
   events.value = events.value.slice(0, 80);
 }
+function panelOpen(name) {
+  return !collapsedPanels.value[name];
+}
+function togglePanel(name) {
+  collapsedPanels.value[name] = !collapsedPanels.value[name];
+}
 function getSource() {
   return editor?.value ?? editor?.textarea?.value ?? savedSource;
 }
@@ -291,6 +310,18 @@ function setEditorSource(source) {
   localStorage.setItem(SCRIPT_SOURCE_KEY, text);
   nextTick(renderDiagnosticLines);
 }
+function handleExternalScriptEditorUpdate(event) {
+  const detail = event?.detail || {};
+  const source = String(detail.source ?? localStorage.getItem(SCRIPT_SOURCE_KEY) ?? '');
+  const name = String(detail.name || localStorage.getItem(SCRIPT_NAME_KEY) || 'main.piAS');
+  if (name) {
+    scriptName.value = name;
+    localStorage.setItem(SCRIPT_NAME_KEY, name);
+  }
+  setEditorSource(source);
+  clearDiagnostics();
+  addLog(`Loaded generated ladder script as ${name}`, 'ok');
+}
 async function refreshScriptLibrary() {
   scriptsLoading.value = true;
   try {
@@ -334,22 +365,52 @@ function downloadSelectedScript() {
   const file = scriptFiles.value.find(f => f.path === selectedScriptPath.value);
   return downloadScript(file || { path: selectedScriptPath.value, name: basename(selectedScriptPath.value) });
 }
+function statusIsDiagnosticFailure(state) {
+  return ['FAILED', 'ERROR', 'QUEUE_FULL'].includes(String(state || '').toUpperCase());
+}
+
 function parseAngelScriptDiagnostics(text) {
   const errors = [];
   const warnings = [];
-  const re = /(?:uploaded_script\s*)?\((\d+)\s*,\s*(\d+)\)\s*:\s*(ERR|WARN|INFO)\s*:\s*(.*)/i;
-  for (const lineText of String(text || '').split(/\r?\n/)) {
-    const m = lineText.match(re);
-    if (!m) continue;
-    const item = {
+  // The ESP32 compile result can return multiple AngelScript diagnostics on
+  // one physical line, for example:
+  //   uploaded_script (11,1): ERR: Expected identifier uploaded_script (11,1): ERR: Instead found reserved keyword 'class' Build failed
+  // So this parser scans the whole text, not line-by-line. It accepts bare
+  // diagnostics plus optional generated/uploaded filenames or paths before
+  // the (line,col) location.
+  const source = String(text || '').replace(/\r\n/g, '\n');
+  const diagRe = /(?:^|\s)(?:(?:[A-Za-z0-9_./\\:-]+)\s+)?\((\d+)\s*,\s*(\d+)\)\s*:\s*(ERR|WARN|INFO)\s*:\s*/gi;
+  const matches = [];
+  let m;
+  while ((m = diagRe.exec(source)) !== null) {
+    matches.push({
+      index: m.index,
+      bodyStart: diagRe.lastIndex,
       line: Math.max(1, parseInt(m[1], 10) || 1),
       col: Math.max(1, parseInt(m[2], 10) || 1),
-      msg: m[4] || lineText,
-    };
-    if (m[3].toUpperCase() === 'ERR') errors.push(item);
-    else if (m[3].toUpperCase() === 'WARN') warnings.push(item);
+      level: String(m[3] || '').toUpperCase(),
+    });
+  }
+
+  for (let i = 0; i < matches.length; i += 1) {
+    const cur = matches[i];
+    const next = matches[i + 1];
+    let msg = source.slice(cur.bodyStart, next ? next.index : source.length)
+      .replace(/\s*Build failed\s*$/i, '')
+      .trim();
+    if (!msg) msg = `${cur.level} at ${cur.line}:${cur.col}`;
+    const item = { line: cur.line, col: cur.col, msg };
+    if (cur.level === 'ERR') errors.push(item);
+    else if (cur.level === 'WARN') warnings.push(item);
   }
   return { errors, warnings };
+}
+
+function updateDiagnosticsFromText(text) {
+  const parsed = parseAngelScriptDiagnostics(text);
+  diagnostics.value = parsed;
+  nextTick(renderDiagnosticLines);
+  return parsed;
 }
 function installEditorDiagnosticStyles() {
   const root = editor?.scrollContainer?.getRootNode?.();
@@ -404,9 +465,14 @@ async function pollStatusOnce(logResult = false) {
   try {
     const s = await getScriptStatus();
     status.value = s || {};
+    const state = displayState.value;
+    const resultText = String(s?.last_result || '');
+    if (resultText && statusIsDiagnosticFailure(state)) {
+      updateDiagnosticsFromText(resultText);
+    }
     if (logResult) {
-      addLog(`state=${displayState.value} gen=${generationText.value} compile=${compileText.value}`, 'dim');
-      if (s?.last_result) addLog(String(s.last_result), displayState.value === 'FAILED' ? 'err' : 'ok');
+      addLog(`state=${state} gen=${generationText.value} compile=${compileText.value}`, 'dim');
+      if (resultText) addLog(resultText, statusIsDiagnosticFailure(state) ? 'err' : 'ok');
     }
     return s;
   } catch (e) {
@@ -430,8 +496,7 @@ async function waitForCompileResult(timeoutMs = 6500) {
         clearDiagnostics();
         addLog(`Compile OK. generation=${generationText.value} compile=${compileText.value}`, 'ok');
       } else {
-        diagnostics.value = parseAngelScriptDiagnostics(s.last_result || '');
-        nextTick(renderDiagnosticLines);
+        updateDiagnosticsFromText(s.last_result || '');
         addLog(s.last_result || 'Compile failed', 'err');
       }
       store.refreshCommandCenter().catch(() => {});
@@ -449,8 +514,7 @@ async function uploadScript() {
     addLog(`Uploading ${scriptName.value || 'main.as'}...`, 'dim');
     const result = await uploadScriptText(getSource(), scriptName.value || 'main.as');
     if (!result.ok) {
-      diagnostics.value = parseAngelScriptDiagnostics(result.text);
-      nextTick(renderDiagnosticLines);
+      updateDiagnosticsFromText(result.text);
       addLog(`Upload rejected HTTP ${result.status}: ${result.text || 'No response text'}`, 'err');
       await pollStatusOnce(false);
       return;
@@ -487,6 +551,9 @@ onMounted(() => {
   const releasePlcData = store.usePlcData();
   editorCleanup.push(releasePlcData);
   store.refreshPlcData().catch(() => {});
+
+  window.addEventListener('pilab:set-script-editor', handleExternalScriptEditorUpdate);
+  editorCleanup.push(() => window.removeEventListener('pilab:set-script-editor', handleExternalScriptEditorUpdate));
 
   registerPiLabCompletions();
   editor = minimalEditor(

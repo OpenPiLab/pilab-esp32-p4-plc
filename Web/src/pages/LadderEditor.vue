@@ -3,7 +3,6 @@
   <section class="glass rounded-2xl px-4 py-2 flex flex-wrap items-center justify-between gap-3 overflow-hidden">
     <div class="min-w-0 shrink-0">
       <h1 class="text-lg font-bold truncate">Ladder Editor</h1>
-      <div class="text-[11px] text-slate-500 mono truncate max-w-[220px]" :title="currentLadderFilePath || 'Unsaved ladder program'">{{ currentLadderFileLabel }}<span v-if="ladderDirty" class="text-amber-300"> *</span></div>
     </div>
 
     <div class="panel rounded-xl px-2 py-1.5 flex flex-wrap items-center gap-1.5 min-w-0 flex-1" aria-label="Ladder tools">
@@ -12,12 +11,17 @@
       <button @click="mode='branch'; branchStart=null; show('Branch Tool: click start wire node, then end wire node')" class="px-3 py-1.5 rounded-lg border text-left btn text-xs whitespace-nowrap" :class="mode==='branch'?'bg-blue-500/20 border-blue-300/60':'bg-slate-900 border-slate-700'">⎇ Draw Branch</button>
       <button @click="mode='delete'" class="px-3 py-1.5 rounded-lg border text-left btn text-xs whitespace-nowrap" :class="mode==='delete'?'bg-red-500/20 border-red-300/60':'bg-slate-900 border-slate-700'">⌫ Delete Element</button>
       <button v-if="selectedBranch" @click="deleteBranch(selectedBranch.rung, selectedBranch.branchId)" class="px-3 py-1.5 rounded-lg border text-left btn text-xs whitespace-nowrap bg-red-500/15 border-red-300/50 text-red-100">✕ Delete Selected Branch</button>
+      <span v-if="ladderDirty" class="ml-auto px-2.5 py-1 rounded-lg border border-amber-300/35 bg-amber-500/10 text-amber-200 text-[11px] font-bold whitespace-nowrap">Unsaved changes</span>
     </div>
 
     <div class="flex flex-wrap justify-end gap-2 shrink-0">
       <button @click="undo" :disabled="!history.length" class="btn px-3 py-1.5 rounded-xl border border-slate-500/60 bg-slate-700/50 font-semibold text-xs disabled:opacity-40 disabled:cursor-not-allowed">Undo</button>
-      <button @click="$refs.jsonImport.click()" class="btn px-3 py-1.5 rounded-xl border border-indigo-300/35 bg-indigo-500/15 text-indigo-100 font-semibold text-xs">Import JSON</button>
-      <input ref="jsonImport" type="file" accept=".json,application/json" class="hidden" @change="importJsonFile"/>
+      <button @click="$refs.jsonImport.click()" class="btn px-3 py-1.5 rounded-xl border border-indigo-300/35 bg-indigo-500/15 text-indigo-100 font-semibold text-xs">Open</button>
+      <button @click="downloadJson" class="btn px-3 py-1.5 rounded-xl border border-slate-500/60 bg-slate-700/50 font-semibold text-xs">Save</button>
+      <button @click="syncDiscoveredTagsToTagStore" class="btn px-3 py-1.5 rounded-xl border border-emerald-300/35 bg-emerald-500/15 text-emerald-100 font-semibold text-xs" title="Merge ladder-discovered tags into the Web app Tag Registry memory store.">Sync Tags</button>
+      <button @click="sendGeneratedAngelScriptToScriptEditor" class="btn px-3 py-1.5 rounded-xl border border-amber-300/35 bg-amber-500/15 text-amber-100 font-semibold text-xs" title="Generate AngelScript from this ladder project and send it to the Script page editor without uploading to the PLC.">Send to Script</button>
+      <button @click="uploadGeneratedAngelScriptToPlc" :disabled="ladderUploadBusy" class="btn px-3 py-1.5 rounded-xl border border-purple-300/35 bg-purple-500/15 text-purple-100 font-semibold text-xs disabled:opacity-40" title="Generate AngelScript from this ladder project and upload it to the PLC.">{{ ladderUploadBusy ? 'Uploading...' : 'Upload PLC' }}</button>
+      <input ref="jsonImport" type="file" accept=".piLadder,.json,application/json" class="hidden" @change="importJsonFile"/>
     </div>
   </section>
 
@@ -60,29 +64,18 @@
       <div class="px-4 py-3 border-b border-slate-800 flex flex-wrap items-start justify-between gap-3">
         <div class="min-w-[260px] flex-1">
           <div class="flex items-center gap-2 flex-wrap">
-            <button v-for="tab in viewTabs" :key="tab.id" @click="activeView=tab.id"
+            <button v-for="tab in visibleViewTabs" :key="tab.id" @click="activeView=tab.id"
               class="btn px-3 py-1.5 rounded-lg border text-xs font-semibold"
               :class="activeView===tab.id ? 'bg-cyan-500/15 border-cyan-300/50 text-cyan-100' : 'bg-slate-900/70 border-slate-700 text-slate-300 hover:border-slate-500'">
               {{tab.label}}
             </button>
+            <button @click="toggleCodeTabs" class="btn px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-900/70 text-xs font-bold text-slate-300 hover:border-slate-500" :title="showCodeTabs ? 'Hide JSON, AngelScript, and JavaScript tabs' : 'Show JSON, AngelScript, and JavaScript tabs'">
+              {{ showCodeTabs ? '<' : '>' }}
+            </button>
           </div>
-          <p class="text-xs text-slate-400 mt-1 leading-relaxed">
-            <span v-if="activeView==='ladder'">
-              {{ mode==='branch'
-                ? (branchStart ? 'Click the end wire node. Main and branch wire nodes are valid.' : 'Click the start wire node. Main and branch wire nodes are valid.')
-                : 'Ladder, JSON, AngelScript, and JavaScript are different views of the same logic.' }}
-            </span>
-            <span v-else>{{activeViewDescription}}</span>
-          </p>
         </div>
         <div class="flex flex-wrap items-center justify-end gap-2 shrink-0 max-w-full">
-          <template v-if="activeView==='project'">
-            <button @click="saveLadderFile" :disabled="ladderFileBusy" class="btn px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-300/35 text-emerald-200 text-xs whitespace-nowrap disabled:opacity-40">Save</button>
-            <button @click="refreshLadderFiles" :disabled="ladderFileBusy" class="btn px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-600 text-xs whitespace-nowrap disabled:opacity-40">Refresh</button>
-            <button @click="syncDiscoveredTagsToTagStore" class="btn px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-300/35 text-emerald-200 text-xs whitespace-nowrap" title="Merge tags discovered from this ladder project into the Web app Tag Registry memory store. Use the Tags page to edit/save them to the PLC.">Sync Tags</button>
-            <button @click="uploadGeneratedAngelScriptToPlc" :disabled="ladderUploadBusy" class="btn px-3 py-1.5 rounded-lg bg-purple-500/10 border border-purple-300/35 text-purple-200 text-xs whitespace-nowrap disabled:opacity-40" title="Generate AngelScript from this ladder project and upload it to the PLC.">{{ ladderUploadBusy ? 'Uploading...' : 'Upload PLC' }}</button>
-          </template>
-          <template v-else-if="activeView==='ladder'">
+          <template v-if="activeView==='ladder'">
             <span class="text-xs text-slate-400">Mode:</span>
             <span class="mono text-xs px-2 py-1 rounded border border-cyan-300/30 bg-cyan-500/10 text-cyan-200">{{ mode }}</span>
             <button @click="clearAll" class="btn px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-300/30 text-red-200 text-xs">Clear All</button>
@@ -96,8 +89,9 @@
               <input type="checkbox" v-model="includeAngelScriptTags" class="accent-cyan-400" />
               <span>Add Tags</span>
             </label>
-            <button @click="copy(transpile(includeAngelScriptTags))" class="btn px-3 py-1.5 rounded-lg bg-cyan-500/10 border border-cyan-300/35 text-cyan-200 text-xs">Copy AngelScript</button>
+            <button @click="copy(generatedAngelScriptSource(includeAngelScriptTags))" class="btn px-3 py-1.5 rounded-lg bg-cyan-500/10 border border-cyan-300/35 text-cyan-200 text-xs">Copy AngelScript</button>
             <button @click="downloadAs" class="btn px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-300/35 text-amber-100 text-xs">Export AngelScript</button>
+            <button @click="sendGeneratedAngelScriptToScriptEditor" class="btn px-3 py-1.5 rounded-lg bg-amber-500/15 border border-amber-300/35 text-amber-100 text-xs">Send to Script</button>
             <button @click="uploadGeneratedAngelScriptToPlc" :disabled="ladderUploadBusy" class="btn px-3 py-1.5 rounded-lg bg-purple-500/10 border border-purple-300/35 text-purple-200 text-xs disabled:opacity-40">{{ ladderUploadBusy ? 'Uploading...' : 'Upload PLC' }}</button>
           </template>
           <template v-else-if="activeView==='javascript'">
@@ -114,7 +108,7 @@
             <div>
               <h3 class="font-bold text-slate-200">Current Ladder File</h3>
               <div class="text-xs text-slate-500 mono mt-1">
-                {{ currentLadderFilePath || '/ladder/(unsaved).json' }}
+                {{ currentLadderFilePath || '/ladder/(unsaved).piLadder' }}
                 <span v-if="ladderDirty" class="text-amber-300 font-bold"> · unsaved changes</span>
                 <span v-else class="text-emerald-300"> · saved</span>
               </div>
@@ -133,7 +127,7 @@
           <div class="grid grid-cols-1 lg:grid-cols-[minmax(260px,420px)_1fr] gap-3">
             <label class="block text-xs text-slate-400 space-y-1">
               <span>File name</span>
-              <input v-model="ladderFileNameDraft" @keydown.enter.prevent="saveLadderFileAs" class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 outline-none focus:border-cyan-400 mono" placeholder="main.json" />
+              <input v-model="ladderFileNameDraft" @keydown.enter.prevent="downloadJson" class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 outline-none focus:border-cyan-400 mono" placeholder="main.piLadder" />
             </label>
             <div class="rounded-lg border border-slate-800 bg-black/20 p-3 text-xs text-slate-400 leading-relaxed">
               Ladder JSON is optional project/source storage under <span class="mono text-slate-300">/ladder</span>. <b>Upload PLC</b> generates AngelScript and uses the same script upload/compile path as the Script page, so it does not require saving the ladder JSON first. Use <b>Export JSON</b> to keep a local copy.
@@ -254,8 +248,44 @@
           <div class="rounded-lg bg-black/30 border border-slate-800 p-3 mono text-xs text-slate-300 whitespace-pre-wrap">{{projectBundleManifestText()}}</div>
         </section>
       </div>
-      <div v-show="activeView==='ladder'" class="canvas-bg overflow-y-auto overflow-x-hidden scrollbar min-h-0">
-        <div class="p-4">
+      <div v-show="activeView==='ladder'" class="canvas-bg overflow-y-auto overflow-x-hidden scrollbar min-h-0 relative">
+        <div v-if="ladderUploadStatus || ladderCompileDiagnostics.errors.length || ladderCompileDiagnostics.warnings.length || ladderCompileDiagnostics.raw" class="absolute top-4 right-4 z-20 w-[min(520px,calc(100%-2rem))] rounded-2xl border border-slate-700 bg-slate-950/95 shadow-2xl p-4 space-y-3">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <h3 class="font-bold text-slate-100 text-sm">PLC Upload Status</h3>
+              <div v-if="ladderUploadStatus" :class="ladderUploadStatusClass" class="text-xs mt-1 leading-relaxed">{{ ladderUploadStatus }}</div>
+            </div>
+            <button @click="ladderUploadStatus=''; clearLadderCompileDiagnostics()" class="btn px-2 py-1 rounded-lg bg-slate-800 border border-slate-700 text-[11px] text-slate-300">Close</button>
+          </div>
+          <div v-if="ladderCompileDiagnostics.errors.length || ladderCompileDiagnostics.warnings.length || ladderCompileDiagnostics.raw" class="rounded-lg border border-slate-800 bg-black/25 p-3 text-xs space-y-2 max-h-56 overflow-auto scrollbar">
+            <div v-if="ladderCompileDiagnostics.errors.length" class="space-y-1">
+              <div v-for="(err, idx) in ladderCompileDiagnostics.errors" :key="'le'+idx" class="text-red-300 mono">ERR {{err.line}}:{{err.col}} — {{err.msg}}</div>
+            </div>
+            <div v-if="ladderCompileDiagnostics.warnings.length" class="space-y-1">
+              <div v-for="(warn, idx) in ladderCompileDiagnostics.warnings" :key="'lw'+idx" class="text-amber-300 mono">WARN {{warn.line}}:{{warn.col}} — {{warn.msg}}</div>
+            </div>
+            <pre v-if="ladderCompileDiagnostics.raw && !ladderCompileDiagnostics.errors.length && !ladderCompileDiagnostics.warnings.length" class="whitespace-pre-wrap text-slate-400 mono">{{ ladderCompileDiagnostics.raw }}</pre>
+          </div>
+        </div>
+
+        <div class="p-4 space-y-4">
+          <section class="rounded-xl border border-slate-800 bg-slate-950/70 p-3 space-y-3">
+            <div class="grid grid-cols-1 xl:grid-cols-[minmax(220px,320px)_1fr_120px] gap-3 items-start">
+              <label class="block text-xs text-slate-400 space-y-1">
+                <span>File name</span>
+                <input v-model="ladderFileNameDraft" @keydown.enter.prevent="downloadJson" class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 outline-none focus:border-cyan-400 mono" placeholder="main.piLadder" />
+              </label>
+              <label class="block text-xs text-slate-400 space-y-1">
+                <span>Description</span>
+                <input v-model="project.description" class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 outline-none focus:border-cyan-400" placeholder="Describe what this ladder file does." />
+              </label>
+              <label class="block text-xs text-slate-400 space-y-1">
+                <span>Scan ms</span>
+                <input type="number" min="1" step="1" v-model.number="project.scan_ms" class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 outline-none focus:border-cyan-400" />
+              </label>
+            </div>
+          </section>
+
           <div v-for="(rung, rIndex) in project.rungs" :key="rung.id" class="mb-4">
             <div class="flex items-center gap-2 mb-2 flex-wrap">
               <div class="mono text-sm text-slate-300 flex items-center gap-2 min-w-[360px]">
@@ -655,9 +685,9 @@ export default {
       mainSegments:[0,1,2,3,4,5,6,7],
       selectedTool:'NO',
       draggedTool:null,
-      activeView:'project',
+      activeView:'ladder',
+      showCodeTabs:false,
       viewTabs:[
-        {id:'project', label:'Files'},
         {id:'ladder', label:'Ladder'},
         {id:'json', label:'JSON'},
         {id:'angelscript', label:'AngelScript'},
@@ -731,7 +761,10 @@ export default {
     ladderDirty(){ return !!this.ladderStore.dirty; },
     currentLadderFilePath(){ return this.ladderStore.currentFilePath || ''; },
     currentLadderFileLabel(){
-      return this.ladderStore.currentFileName ? this.ladderStore.currentFileName : 'Unsaved ladder';
+      return this.ladderStore.currentFileName ? this.ladderStore.currentFileName : 'Untitled ladder';
+    },
+    visibleViewTabs(){
+      return this.showCodeTabs ? this.viewTabs : this.viewTabs.filter(tab => tab.id === 'ladder');
     },
     flashWritesAllowedNow(){
       return this.plcStore && this.plcStore.flashWritesAllowed ? this.plcStore.flashWritesAllowed.value !== false : true;
@@ -833,13 +866,17 @@ export default {
   },
   mounted(){
     if(!restoreLadderEditorSnapshot(this)) {
+      this.suppressLadderDirty = true;
       this.project = this.blankLadderProject();
       this.jsonDraft = this.jsonModel;
       setLadderCurrentFile('', '');
       markLadderProjectSaved();
       saveLadderEditorSnapshot(this);
+      nextTick(() => { this.suppressLadderDirty = false; markLadderProjectSaved(); saveLadderEditorSnapshot(this); });
     }
-    this.ladderFileNameDraft = this.ladderStore.currentFileName || 'main.json';
+    this.activeView = 'ladder';
+    this.showCodeTabs = false;
+    this.ladderFileNameDraft = this.ladderFileNameDraft || this.ladderStore.currentFileName || 'main.piLadder';
     this.selectedLadderFile = this.ladderStore.currentFilePath || '';
     this.refreshLadderFiles().catch(() => {});
     ensureTagStoreLoaded().catch(() => {});
@@ -868,6 +905,16 @@ export default {
     includeAngelScriptTags(){
       this.refreshPrismOutputEditors();
       saveLadderEditorSnapshot(this);
+    },
+    showCodeTabs(){
+      if(!this.showCodeTabs && ['json','angelscript','javascript'].includes(this.activeView)) this.activeView = 'ladder';
+      saveLadderEditorSnapshot(this);
+    },
+    ladderFileNameDraft(newName, oldName){
+      if(newName === oldName) return;
+      setLadderCurrentFile(String(newName || '').trim(), '');
+      if(!this.suppressLadderDirty) markLadderProjectDirty();
+      saveLadderEditorSnapshot(this);
     }
   },
   methods:{
@@ -876,6 +923,11 @@ export default {
     ...ladderSimulatorMethods,
     ...ladderTranspilerMethods,
     ...ladderTagRegistryMethods,
+    toggleCodeTabs(){
+      this.showCodeTabs = !this.showCodeTabs;
+      if(!this.showCodeTabs && ['json','angelscript','javascript'].includes(this.activeView)) this.activeView = 'ladder';
+      nextTick(() => this.refreshPrismOutputEditors());
+    },
     isEditableKeyboardTarget(target){
       if(!target) return false;
       const tag = String(target.tagName || '').toLowerCase();
@@ -932,7 +984,7 @@ export default {
         if(this.syncingJsonEditor) return;
         this.jsonDraft = value;
       });
-      this.prismEditors.angelscript = makeReadonly(this.$refs.angelScriptEditorHost, 'cpp', this.transpile(this.includeAngelScriptTags));
+      this.prismEditors.angelscript = makeReadonly(this.$refs.angelScriptEditorHost, 'cpp', this.generatedAngelScriptSource(this.includeAngelScriptTags));
       this.prismEditors.javascript = makeReadonly(this.$refs.javascriptEditorHost, 'javascript', this.transpileJavaScript());
       this.prismEditorsReady = true;
       this.refreshPrismOutputEditors();
@@ -969,7 +1021,7 @@ export default {
         this.prismEditors.json.setOptions({ value: jsonValue });
         this.syncingJsonEditor = false;
       }
-      this.prismEditors.angelscript?.setOptions({ value:this.transpile(this.includeAngelScriptTags) });
+      this.prismEditors.angelscript?.setOptions({ value:this.generatedAngelScriptSource(this.includeAngelScriptTags) });
       this.prismEditors.javascript?.setOptions({ value:this.transpileJavaScript() });
     },
     destroyPrismOutputEditors(){
@@ -986,8 +1038,9 @@ export default {
     fileApiJoin(a,b){ return (a === '/' ? '/' + b : String(a || '').replace(/\/+$/,'') + '/' + b).replace(/\/+/g,'/'); },
     normalizeLadderFileName(name){
       let clean = String(name || '').trim().replace(/[\\/]+/g, '_');
-      if(!clean) clean = this.ladderStore.currentFileName || 'main.json';
-      if(!/\.json$/i.test(clean)) clean += '.json';
+      if(!clean) clean = this.ladderStore.currentFileName || 'main.piLadder';
+      clean = clean.replace(/\.json$/i, '.piLadder');
+      if(!/\.piLadder$/i.test(clean)) clean += '.piLadder';
       return clean;
     },
     ladderFilePathForName(name){ return this.fileApiJoin('/ladder', this.normalizeLadderFileName(name)); },
@@ -1013,7 +1066,7 @@ export default {
           }
         }
         this.ladderFiles = (j.entries || [])
-          .filter(e => !e.dir && /\.json$/i.test(e.name || e.path || ''))
+          .filter(e => !e.dir && /\.(?:piLadder|json)$/i.test(e.name || e.path || ''))
           .sort((a,b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { numeric:true }));
         if(this.ladderStore.currentFilePath && this.ladderFiles.some(f => f.path === this.ladderStore.currentFilePath)) {
           this.selectedLadderFile = this.ladderStore.currentFilePath;
@@ -1045,11 +1098,11 @@ export default {
       this.simScanCount = 0;
     },
     async saveLadderFile(){
-      const name = this.ladderStore.currentFileName || this.ladderFileNameDraft || 'main.json';
+      const name = this.ladderStore.currentFileName || this.ladderFileNameDraft || 'main.piLadder';
       return this.saveLadderFileToName(name);
     },
     async saveLadderFileAs(){
-      return this.saveLadderFileToName(this.ladderFileNameDraft || this.ladderStore.currentFileName || 'main.json');
+      return this.saveLadderFileToName(this.ladderFileNameDraft || this.ladderStore.currentFileName || 'main.piLadder');
     },
     async saveLadderFileToName(name){
       await this.refreshPlcModeForFiles();
@@ -1097,7 +1150,7 @@ export default {
         this.project = parsed;
         this.jsonDraft = this.jsonModel;
         this.resetLadderRuntimeState();
-        const name = String(path || '').split('/').pop() || 'main.json';
+        const name = String(path || '').split('/').pop() || 'main.piLadder';
         setLadderCurrentFile(name, path);
         markLadderProjectSaved();
         this.ladderFileNameDraft = name;
@@ -1123,7 +1176,7 @@ export default {
       this.resetLadderRuntimeState();
       setLadderCurrentFile('', '');
       markLadderProjectSaved();
-      this.ladderFileNameDraft = 'main.json';
+      this.ladderFileNameDraft = 'main.piLadder';
       this.selectedLadderFile = '';
       this.ladderFileStatus = 'Created a new unsaved ladder program.';
       this.show('New ladder program');
@@ -1419,7 +1472,7 @@ export default {
     },
     projectBundleManifestText(){
       return [
-        'pilab_ladder_project.json  - PiLab ladder/script project',
+        'pilab_ladder_project.piLadder  - PiLab ladder/script project',
         'pilab_ladder_generated.as  - AngelScript export',
         'pilab_ladder_generated.js  - JavaScript simulator/runtime export',
         'README.txt                 - Bundle summary and notes'
@@ -1501,8 +1554,8 @@ Notes:
     downloadProjectBundle(){
       const safe=String(this.project.name || 'pilab_project').toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'') || 'pilab_project';
       const files=[
-        {name:'pilab_ladder_project.json', text:this.jsonModel},
-        {name:'pilab_ladder_generated.as', text:this.transpile(this.includeAngelScriptTags)},
+        {name:'pilab_ladder_project.piLadder', text:this.jsonModel},
+        {name:'pilab_ladder_generated.as', text:this.generatedAngelScriptSource(this.includeAngelScriptTags)},
         {name:'pilab_ladder_generated.js', text:this.transpileJavaScript()},
         {name:'README.txt', text:this.projectBundleReadmeText()}
       ];
@@ -1547,30 +1600,22 @@ Notes:
       return names.find(n => n === baseName) || names.find(n => String(n).split('/').pop() === baseName) || null;
     },
     importProjectBundlePayload(files){
-      const projectName = this.findBundleFile(files, 'pilab_ladder_project.json');
-      if(!projectName) throw new Error('Bundle is missing pilab_ladder_project.json.');
+      const projectName = this.findBundleFile(files, 'pilab_ladder_project.piLadder') || this.findBundleFile(files, 'pilab_ladder_project.json');
+      if(!projectName) throw new Error('Bundle is missing pilab_ladder_project.piLadder.');
       const parsedProject = JSON.parse(files[projectName]);
       this.normalizeImportedProject(parsedProject);
 
+      this.suppressLadderDirty = true;
       this.pushHistory('Import project bundle');
       this.project = parsedProject;
       this.jsonDraft = this.jsonModel;
-      this.selected = null;
-      this.selectedBranch = null;
-      this.branchStart = null;
-      this.editingCommentId = null;
-      this.mode = 'select';
-
-      // Reset simulator runtime state because the loaded project/tag set changed.
-      this.stopSimRun();
-      this.simTags = {};
-      this.simBlocks = {};
-      this.simRungs = {};
-      this.simProgram = null;
-      this.simCompiledCode = '';
-      this.simScanCount = 0;
-
+      this.resetLadderRuntimeState();
+      const importedName = String(projectName || 'pilab_ladder_project.piLadder').split('/').pop() || 'pilab_ladder_project.piLadder';
+      setLadderCurrentFile(importedName, '');
+      this.ladderFileNameDraft = importedName;
+      markLadderProjectSaved();
       saveLadderEditorSnapshot(this);
+      nextTick(() => { this.suppressLadderDirty = false; markLadderProjectSaved(); saveLadderEditorSnapshot(this); });
       return { projectName };
     },
     importProjectBundleFile(ev){
@@ -1594,7 +1639,17 @@ Notes:
       };
       reader.readAsArrayBuffer(file);
     },
-    downloadJson(){ this.download('pilab_ladder_project.json',this.jsonModel,'application/json'); },
+    downloadJson(){
+      const safeName = this.normalizeLadderFileName(this.ladderFileNameDraft || this.ladderStore.currentFileName || 'pilab_ladder_project.piLadder');
+      this.download(safeName, this.jsonModel, 'application/json');
+      this.suppressLadderDirty = true;
+      this.ladderFileNameDraft = safeName;
+      setLadderCurrentFile(safeName, '');
+      markLadderProjectSaved();
+      saveLadderEditorSnapshot(this);
+      nextTick(() => { this.suppressLadderDirty = false; saveLadderEditorSnapshot(this); });
+      this.show('Exported ' + safeName);
+    },
     importJsonFile(ev){
       const file = ev && ev.target && ev.target.files ? ev.target.files[0] : null;
       if(!file) return;
@@ -1603,15 +1658,18 @@ Notes:
         try {
           const parsed = JSON.parse(String(reader.result || ''));
           this.normalizeImportedProject(parsed);
+          this.suppressLadderDirty = true;
           this.pushHistory('Import JSON file');
           this.project = parsed;
           this.jsonDraft = this.jsonModel;
-          this.selected = null;
-          this.selectedBranch = null;
-          this.branchStart = null;
-          this.editingCommentId = null;
-          this.mode = 'select';
-          this.show('Imported '+(file.name || 'JSON project'));
+          this.resetLadderRuntimeState();
+          const importedName = this.normalizeLadderFileName(file.name || 'imported_ladder.piLadder');
+          setLadderCurrentFile(importedName, '');
+          this.ladderFileNameDraft = importedName;
+          markLadderProjectSaved();
+          saveLadderEditorSnapshot(this);
+          nextTick(() => { this.suppressLadderDirty = false; markLadderProjectSaved(); saveLadderEditorSnapshot(this); });
+          this.show('Imported '+(file.name || 'JSON project')+'; simulator reset');
         } catch(e) {
           alert('Could not import JSON: '+e.message);
         } finally {
@@ -1625,12 +1683,59 @@ Notes:
       reader.readAsText(file);
     },
 
+    angelScriptGenerationMetadata(){
+      const review = this.projectReview ? this.projectReview() : null;
+      const now = new Date();
+      const sourceFileName = this.normalizeLadderFileName(this.ladderFileNameDraft || this.ladderStore.currentFileName || 'main.piLadder');
+      const rungSummary = review
+        ? `${review.rungCount} total, ${review.ladderRungCount} ladder, ${review.scriptRungCount} script`
+        : `${(this.project.rungs || []).length} total`;
+      const tagSummary = review
+        ? `${review.tagCount} ladder-discovered`
+        : '';
+      return {
+        sourceFileName,
+        generatedAt: now.toLocaleString(),
+        description: this.project.description || '',
+        rungSummary,
+        tagSummary,
+        notes: 'Generated from the Ladder page. Edit the .piLadder source file for normal ladder changes.'
+      };
+    },
+    generatedAngelScriptSource(includeTagGlobals=false){
+      return this.transpile(includeTagGlobals, this.angelScriptGenerationMetadata());
+    },
+
     generatedScriptName(){
       const base = this.ladderStore.currentFileName
-        ? String(this.ladderStore.currentFileName).replace(/\.json$/i, '')
+        ? String(this.ladderStore.currentFileName).replace(/\.(?:piLadder|json)$/i, '')
         : 'main';
       const safe = base.replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^\.+/, '') || 'main';
       return /\.as$/i.test(safe) ? safe : safe + '.as';
+    },
+    generatedScriptEditorName(){
+      const sourceName = this.ladderFileNameDraft || this.ladderStore.currentFileName || 'main.piLadder';
+      const base = String(sourceName)
+        .trim()
+        .replace(/\.(?:piLadder|json|as|piAS)$/i, '')
+        .replace(/[^A-Za-z0-9_.-]+/g, '_')
+        .replace(/^\.+/, '') || 'main';
+      return base + '.piAS';
+    },
+    sendGeneratedAngelScriptToScriptEditor(){
+      const source = this.generatedAngelScriptSource(false);
+      const name = this.generatedScriptEditorName();
+      const previousSource = localStorage.getItem('pilab_script_source_v2') || '';
+      if(previousSource && previousSource !== source) {
+        const ok = confirm('Send generated AngelScript to the Script page editor and replace the current Script editor contents?');
+        if(!ok) return;
+      }
+      localStorage.setItem('pilab_script_source_v2', source);
+      localStorage.setItem('pilab_script_name', name);
+      try {
+        window.dispatchEvent(new CustomEvent('pilab:set-script-editor', { detail: { source, name, from: 'ladder' } }));
+      } catch(_) {}
+      this.show('Sent generated AngelScript to Script editor as ' + name);
     },
     clearLadderCompileDiagnostics(){
       this.ladderCompileDiagnostics = { errors: [], warnings: [], raw: '', state: '' };
@@ -1638,17 +1743,31 @@ Notes:
     parseLadderAngelScriptDiagnostics(text){
       const errors = [];
       const warnings = [];
-      const re = /(?:uploaded_script\s*)?\((\d+)\s*,\s*(\d+)\)\s*:\s*(ERR|WARN|INFO)\s*:\s*(.*)/i;
-      for(const lineText of String(text || '').split(/\r?\n/)) {
-        const m = lineText.match(re);
-        if(!m) continue;
-        const item = {
+      // Scan the entire compile result so multiple diagnostics concatenated
+      // onto one line are all captured.
+      const source = String(text || '').replace(/\r\n/g, '\n');
+      const diagRe = /(?:^|\s)(?:(?:[A-Za-z0-9_./\\:-]+)\s+)?\((\d+)\s*,\s*(\d+)\)\s*:\s*(ERR|WARN|INFO)\s*:\s*/gi;
+      const matches = [];
+      let m;
+      while((m = diagRe.exec(source)) !== null) {
+        matches.push({
+          index: m.index,
+          bodyStart: diagRe.lastIndex,
           line: Math.max(1, parseInt(m[1], 10) || 1),
           col: Math.max(1, parseInt(m[2], 10) || 1),
-          msg: m[4] || lineText,
-        };
-        if(String(m[3]).toUpperCase() === 'ERR') errors.push(item);
-        else if(String(m[3]).toUpperCase() === 'WARN') warnings.push(item);
+          level: String(m[3] || '').toUpperCase(),
+        });
+      }
+      for(let i = 0; i < matches.length; i += 1) {
+        const cur = matches[i];
+        const next = matches[i + 1];
+        let msg = source.slice(cur.bodyStart, next ? next.index : source.length)
+          .replace(/\s*Build failed\s*$/i, '')
+          .trim();
+        if(!msg) msg = `${cur.level} at ${cur.line}:${cur.col}`;
+        const item = { line: cur.line, col: cur.col, msg };
+        if(cur.level === 'ERR') errors.push(item);
+        else if(cur.level === 'WARN') warnings.push(item);
       }
       return { errors, warnings };
     },
@@ -1702,7 +1821,7 @@ Notes:
         // file is optional source/project storage; the runtime artifact is the
         // generated AngelScript sent through the same compile-safe upload path
         // used by the Script page.
-        const source = this.transpile(false);
+        const source = this.generatedAngelScriptSource(false);
         const name = this.generatedScriptName();
         const result = await uploadScriptText(source, name);
         if(!result.ok) {
@@ -1755,7 +1874,7 @@ Notes:
       };
       reader.readAsText(file);
     },
-    downloadAs(){ this.download('pilab_ladder_generated.as',this.transpile(this.includeAngelScriptTags),'text/plain'); },
+    downloadAs(){ this.download('pilab_ladder_generated.as',this.generatedAngelScriptSource(this.includeAngelScriptTags),'text/plain'); },
     downloadJavaScript(){ this.download('pilab_ladder_generated.js',this.transpileJavaScript(),'text/javascript'); },
     updateTagRegistryField(name, field, value){
       this.setTagRegistryOverride(name, { [field]: value });

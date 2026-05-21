@@ -26,7 +26,8 @@ export function saveLadderEditorSnapshot(vm) {
   if (!vm) return;
   state.snapshot = {
     project: clone(vm.project),
-    activeView: vm.activeView || 'project',
+    activeView: vm.activeView || 'ladder',
+    showCodeTabs: !!vm.showCodeTabs,
     jsonDraft: typeof vm.jsonDraft === 'string' ? vm.jsonDraft : '',
     selectedTool: vm.selectedTool || 'NO',
     mode: vm.mode || 'select',
@@ -40,6 +41,7 @@ export function saveLadderEditorSnapshot(vm) {
     simTagFilter: vm.simTagFilter || '',
     simWatchOnly: !!vm.simWatchOnly,
     simWatchTags: clone(vm.simWatchTags) || {},
+    ladderFileNameDraft: typeof vm.ladderFileNameDraft === 'string' ? vm.ladderFileNameDraft : '',
     currentFileName: state.currentFileName || '',
     currentFilePath: state.currentFilePath || '',
     dirty: !!state.dirty,
@@ -54,7 +56,8 @@ export function restoreLadderEditorSnapshot(vm) {
   if (!vm || !state.initialized || !s) return false;
 
   if (s.project) vm.project = clone(s.project) || s.project;
-  vm.activeView = s.activeView || 'project';
+  vm.activeView = ['json','angelscript','javascript'].includes(s.activeView) ? 'ladder' : (s.activeView || 'ladder');
+  vm.showCodeTabs = false;
   vm.jsonDraft = typeof s.jsonDraft === 'string' ? s.jsonDraft : vm.jsonModel;
   vm.selectedTool = s.selectedTool || 'NO';
   vm.mode = s.mode || 'select';
@@ -70,6 +73,7 @@ export function restoreLadderEditorSnapshot(vm) {
   vm.simWatchTags = clone(s.simWatchTags) || {};
   state.currentFileName = s.currentFileName || state.currentFileName || '';
   state.currentFilePath = s.currentFilePath || state.currentFilePath || '';
+  vm.ladderFileNameDraft = s.ladderFileNameDraft || state.currentFileName || vm.ladderFileNameDraft || 'main.piLadder';
   state.dirty = !!s.dirty;
   state.lastSavedAt = Number(s.lastSavedAt || state.lastSavedAt || 0);
 

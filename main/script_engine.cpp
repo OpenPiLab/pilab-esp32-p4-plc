@@ -1,5 +1,4 @@
 #include "script_engine.hpp"
-#include "plc_filesystem.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -262,7 +261,6 @@ static std::atomic<uint32_t> g_total_compile_requests{0};
 static std::atomic<uint32_t> g_total_compile_ok{0};
 static std::atomic<uint32_t> g_total_compile_failed{0};
 static std::atomic<uint32_t> g_total_compile_rejected{0};
-static std::atomic<bool> g_save_after_compile_busy{false};
 static std::atomic<bool> g_compile_busy{false};
 static std::atomic<uint32_t> g_activations{0};
 static std::atomic<uint32_t> g_script_scans_completed{0};
@@ -712,63 +710,6 @@ static void script_cleanup_task(void*)
 }
 
 
-static bool script_engine_save_compiled_script_to_filesystem(const char* filename,
-                                                             const char* script,
-                                                             size_t script_len,
-                                                             char* saved_rel_path,
-                                                             size_t saved_rel_path_len,
-                                                             char* err,
-                                                             size_t err_len)
-{
-    if (!filename || !filename[0] || !script || !saved_rel_path || saved_rel_path_len == 0) {
-        if (err && err_len) snprintf(err, err_len, "Invalid compiled script save request");
-        return false;
-    }
-
-    // The upload handler has already sanitized this, but keep this guard here so
-    // future callers cannot accidentally turn the script name into a path write.
-    if (strstr(filename, "..") || strchr(filename, '/') || strchr(filename, '\\') || filename[0] == '.') {
-        if (err && err_len) snprintf(err, err_len, "Invalid compiled script filename");
-        return false;
-    }
-
-    char dir_path[128] = {0};
-    snprintf(dir_path, sizeof(dir_path), "%s/scripts", PLC_FS_MOUNT_POINT);
-    mkdir(dir_path, 0755); // harmless if it already exists
-
-    char fs_path[192] = {0};
-    int n = snprintf(fs_path, sizeof(fs_path), "%s/scripts/%s", PLC_FS_MOUNT_POINT, filename);
-    if (n < 0 || (size_t)n >= sizeof(fs_path)) {
-        if (err && err_len) snprintf(err, err_len, "Compiled script path is too long");
-        return false;
-    }
-
-    FILE* f = fopen(fs_path, "wb");
-    if (!f) {
-        if (err && err_len) snprintf(err, err_len, "Failed to open /scripts/%s for write", filename);
-        return false;
-    }
-
-    bool ok = true;
-    if (script_len > 0 && fwrite(script, 1, script_len, f) != script_len) {
-        if (err && err_len) snprintf(err, err_len, "Failed to write /scripts/%s", filename);
-        ok = false;
-    }
-
-    if (fclose(f) != 0 && ok) {
-        if (err && err_len) snprintf(err, err_len, "Failed to close /scripts/%s", filename);
-        ok = false;
-    }
-
-    if (!ok) {
-        unlink(fs_path);
-        return false;
-    }
-
-    snprintf(saved_rel_path, saved_rel_path_len, "/scripts/%s", filename);
-    return true;
-}
-
 static void script_compile_task(void*)
 {
     ScriptCompileJob job{};
@@ -799,48 +740,26 @@ static void script_compile_task(void*)
                      (unsigned)uxTaskPriorityGet(nullptr));
 
             char err[1024] = {};
-            g_save_after_compile_busy.store(job.filename[0] != 0);
             bool ok = compile_to_pending(job.source, job.length, err, sizeof(err));
 
-            if (ok && job.filename[0]) {
-                char saved_rel_path[128] = {};
-                char save_err[192] = {};
-                const int64_t save_start_us = esp_timer_get_time();
-                if (!script_engine_save_compiled_script_to_filesystem(job.filename,
-                                                                      job.source,
-                                                                      job.length,
-                                                                      saved_rel_path,
-                                                                      sizeof(saved_rel_path),
-                                                                      save_err,
-                                                                      sizeof(save_err))) {
-                    ok = false;
-                    if (g_program_mutex && xSemaphoreTake(g_program_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-                        g_pending_program.reset();
-                        xSemaphoreGive(g_program_mutex);
-                    }
-                    if (err[0] == 0) {
-                        snprintf(err, sizeof(err), "Compile OK but save failed: %s", save_err);
-                    }
-                    ESP_LOGE(TAG, "Compiled script save failed; pending program discarded: %s", save_err);
-                } else {
-                    const int64_t save_us = esp_timer_get_time() - save_start_us;
-                    ESP_LOGI(TAG, "Saved compiled script to %s (%u bytes, %lld us)",
-                             saved_rel_path,
-                             (unsigned)job.length,
-                             (long long)save_us);
-                    if (g_program_mutex && xSemaphoreTake(g_program_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-                        snprintf(g_pending_script_name, sizeof(g_pending_script_name), "%s", job.filename);
-                        xSemaphoreGive(g_program_mutex);
-                    }
-                }
-            } else if (ok) {
+            if (ok) {
+                // Upload/compile is intentionally RAM-only. Do not write the
+                // uploaded script to LittleFS/flash here; persistent saves must
+                // happen through an explicit user action after validation.
                 if (g_program_mutex && xSemaphoreTake(g_program_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-                    g_pending_script_name[0] = 0;
+                    if (job.filename[0]) {
+                        snprintf(g_pending_script_name, sizeof(g_pending_script_name), "%s", job.filename);
+                    } else {
+                        g_pending_script_name[0] = 0;
+                    }
                     xSemaphoreGive(g_program_mutex);
                 }
+                if (job.filename[0]) {
+                    ESP_LOGI(TAG, "Compiled uploaded script %s into RAM only; not saved to flash", job.filename);
+                } else {
+                    ESP_LOGI(TAG, "Compiled uploaded script into RAM only; not saved to flash");
+                }
             }
-
-            g_save_after_compile_busy.store(false);
 
             heap_caps_free(job.source);
             job.source = nullptr;
@@ -1122,7 +1041,7 @@ bool script_engine_run_scan(void)
     // Activate pending program at scan boundary. This still runs while paused,
     // so successful compile causes a clean swap and then unpauses execution.
     if (xSemaphoreTake(g_program_mutex, 0) == pdTRUE) {
-        if (g_pending_program && !g_save_after_compile_busy.load()) {
+        if (g_pending_program) {
             std::unique_ptr<ScriptProgram> retired_program = std::move(g_active_program);
             g_active_program = std::move(g_pending_program);
             snprintf(g_active_script_name, sizeof(g_active_script_name), "%s", g_pending_script_name);

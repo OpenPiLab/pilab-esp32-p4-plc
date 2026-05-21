@@ -37,8 +37,8 @@ static const char *TAG = "ETH_WEB";
 #define CHUNK_SIZE              512
 
 // Web transfer shaping for reduced PLC jitter.
-#define WEB_SEND_CHUNK_SIZE      1024
-#define WEB_SEND_YIELD_EVERY     2
+#define WEB_SEND_CHUNK_SIZE      4096
+#define WEB_SEND_YIELD_EVERY     1
 #define WEB_RECV_CHUNK_SIZE      4096
 
 // /api/plc_data HMI-like JSON transfer shaping.
@@ -1651,7 +1651,6 @@ static esp_err_t upload_script_post_handler(httpd_req_t *req)
     char requested_name[96] = {0};
     char script_filename[96] = {0};
     char save_err[160] = {0};
-    char saved_rel_path[128] = {0};
 
     upload_script_get_query_name(req, requested_name, sizeof(requested_name));
     if (!upload_script_sanitize_filename(requested_name, script_filename, sizeof(script_filename), save_err, sizeof(save_err))) {
@@ -1661,8 +1660,6 @@ static esp_err_t upload_script_post_handler(httpd_req_t *req)
         httpd_resp_send(req, save_err, HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
-
-    snprintf(saved_rel_path, sizeof(saved_rel_path), "/scripts/%s", script_filename);
 
     const int64_t submit_start_us = esp_timer_get_time();
     char response[256] = {0};
@@ -1680,9 +1677,8 @@ static esp_err_t upload_script_post_handler(httpd_req_t *req)
 
     char json[384];
     snprintf(json, sizeof(json),
-        "{\"accepted\":true,\"message\":\"%s\",\"save_after_compile\":true,\"saved_path\":\"%s\",\"status_url\":\"/api/script_status\"}",
-        response,
-        saved_rel_path);
+        "{\"accepted\":true,\"message\":\"%s\",\"save_after_compile\":false,\"saved_path\":null,\"persistence\":\"ram_only\",\"status_url\":\"/api/script_status\"}",
+        response);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
@@ -2435,6 +2431,14 @@ config.uri_match_fn = httpd_uri_match_wildcard;
         .user_ctx = NULL
     };
     register_uri_checked(g_http_server, &script_uri);
+
+    httpd_uri_t ladder_uri = {
+        .uri = "/ladder",
+        .method = HTTP_GET,
+        .handler = spa_index_get_handler,
+        .user_ctx = NULL
+    };
+    register_uri_checked(g_http_server, &ladder_uri);
 
     httpd_uri_t settings_page_uri = {
         .uri = "/settings",

@@ -1,30 +1,23 @@
 ﻿PiLab Snapshot Info
 ===================
-Created:       2026-05-18 21:58:30
+Created:       2026-05-20 21:57:23
 Project Root:  C:\Users\tonyf\Downloads\P4_PLC
 Script Dir:    C:\Users\tonyf\Downloads\P4_PLC\tools
 Git Found:     True
 Git Path:      C:\Program Files\Git\cmd\git.exe
 Git Repo Root: C:/Users/tonyf/Downloads/P4_PLC
 Git Branch:    main
-Git ShortHash: 326b706
-Git FullHash:  326b7067b965c8060b77038771b474eb5c438ed3
-Latest Commit: 326b706 Updated README for Web Flasher Screen Recording link
+Git ShortHash: 4dc93e2
+Git FullHash:  4dc93e252a33873a079023aba147270dc2dda988
+Latest Commit: 4dc93e2 Add verification for ladder folder during boot
 Git Warning:   
 
 Git Status --short:
- M Web/package.json
- M Web/src/components/AppShell.vue
- M Web/src/pages/HmiDesigner.vue
+ M Web/snapshot_info.txt
+ M Web/src/ladder/ladderTranspiler.js
+ M Web/src/pages/LadderEditor.vue
  M Web/src/pages/ScriptConsole.vue
- M Web/src/pages/TagRegistry.vue
- M Web/src/router.js
-?? Web/INTEGRATION_NOTES.md
-?? Web/schema/
-?? Web/snapshot_info.txt
-?? Web/src/components/ladder/
-?? Web/src/ladder/
-?? Web/src/pages/LadderEditor.vue
-?? Web/src/stores/ladderStore.js
-?? Web/src/stores/tagStore.js
-?? Web/test/
+ M Web/src/stores/ladderStore.js
+ M Web/src/style.css
+ M main/ethernet_web.c
+?? LadderEditor/LadderEditor.zip

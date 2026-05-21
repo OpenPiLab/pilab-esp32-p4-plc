@@ -397,3 +397,12 @@ input[type="range"]::-webkit-slider-thumb{appearance:none;width:12px;height:12px
 }
 .mb-4 { margin-bottom: 1rem; }
 .mt-3 { margin-top: 0.75rem; }
+
+/* Script page right-side collapsible panels */
+.script-panel.collapsed{flex:0 0 auto;min-height:0;}
+.script-panel-toggle{cursor:pointer;user-select:none;}
+.script-panel-head-actions{display:flex;align-items:center;gap:10px;min-width:0;}
+.script-collapse-mark{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border:1px solid #334155;border-radius:999px;color:#94a3b8;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;font-size:12px;line-height:1;background:rgba(2,6,23,.55);}
+.script-panel-toggle:hover .script-collapse-mark{border-color:#38bdf8;color:#e0f2fe;}
+.script-panel.collapsed .script-panel-head{border-bottom:0;}
+.script-panel.collapsed.script-library-panel{max-height:none;}
