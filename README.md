@@ -493,10 +493,6 @@ Currently tested on:
 - Ethernet-enabled ESP32-P4 configurations
 - https://www.amazon.ca/Waveshare-ESP32-P4-Module-High-Performance-Development-ESP32-P4/dp/B0F2MP483W
 
-
-Waveshare PiLab Digital Input Output Pinout
-https://openpilab.github.io/pilab-esp32-p4-plc/schematic/PiLabPLC_Pinout_Mapping.png
-
 Main software stack:
 
 - ESP-IDF v6.x
@@ -504,6 +500,14 @@ Main software stack:
 - Vite
 - TailwindCSS
 - AngelScript
+
+---
+
+## Waveshare PiLab Digital Input Output Pinout
+
+Live PLC status, scan timing, memory, script state, digital I/O, run/stop control, and system pulse history.
+
+![PiLab PLC 40 Pin Connector Layout](schematic/PiLabPLC_Pinout_Mapping.png)
 
 ---
 
