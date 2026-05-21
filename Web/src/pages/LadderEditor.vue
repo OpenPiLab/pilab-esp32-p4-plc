@@ -78,6 +78,7 @@
           <template v-if="activeView==='ladder'">
             <span class="text-xs text-slate-400">Mode:</span>
             <span class="mono text-xs px-2 py-1 rounded border border-cyan-300/30 bg-cyan-500/10 text-cyan-200">{{ mode }}</span>
+            <button @click="openLadderPrintView" class="btn px-3 py-1.5 rounded-lg bg-white/10 border border-white/25 text-slate-100 text-xs" title="Open a clean printable ladder view. Use the browser print dialog to save as PDF.">Print</button>
             <button @click="clearAll" class="btn px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-300/30 text-red-200 text-xs">Clear All</button>
           </template>
           <template v-else-if="activeView==='json'">
@@ -1030,6 +1031,650 @@ export default {
       }
       this.prismEditors = { json:null, angelscript:null, javascript:null };
       this.prismEditorsReady = false;
+    },
+    escapePrintHtml(value){
+      return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    },
+    syntaxHighlightAngelScript(code){
+      const keywords = /\b(if|else|for|while|do|switch|case|break|continue|return|class|void|bool|int|uint|float|double|string|auto|const|true|false|null|and|or|not)\b/g;
+      const numbers = /\b(\d+(?:\.\d+)?)\b/g;
+      return String(code || '').split(/\r?\n/).map((rawLine) => {
+        let line = this.escapePrintHtml(rawLine);
+        const trimmed = line.trim();
+        if(trimmed.startsWith('//')) return '<span class="tok-comment">' + line + '</span>';
+        line = line.replace(/(&quot;.*?&quot;|&#39;.*?&#39;)/g, '<span class="tok-string">$1</span>');
+        line = line.replace(keywords, '<span class="tok-keyword">$1</span>');
+        line = line.replace(numbers, '<span class="tok-number">$1</span>');
+        const idx = line.indexOf('//');
+        if(idx >= 0) line = line.slice(0, idx) + '<span class="tok-comment">' + line.slice(idx) + '</span>';
+        return line;
+      }).join('\n');
+    },
+    printBlockColor(t){ return (t==='TON'||t==='TOF') ? '#a16207' : (t==='ONS' ? '#0369a1' : '#7e22ce'); },
+    printCoilColor(t){ return t==='SET' ? '#1d4ed8' : (t==='RST' ? '#dc2626' : '#15803d'); },
+    printPresetLabel(el){
+      if(!el) return '';
+      if(el.type==='TON'||el.type==='TOF') return `${el.preset || 1000}ms`;
+      if(el.type==='CTU'||el.type==='CTD') return `PV ${el.preset || 10}`;
+      if(el.type==='ONS') return 'one scan';
+      return '';
+    },
+    printSymbolLeadBounds(el, x){
+      if(!el) return null;
+      if(['TON','TOF','CTU','CTD','ONS'].includes(el.type)) return { left:x-31, right:x+31 };
+      return { left:x-30, right:x+30 };
+    },
+    printCircuitSlotSvg(cells, slot, y, wire){
+      const leftNode = this.nodeX(slot);
+      const rightNode = this.nodeX(slot + 1);
+      const el = cells && cells[slot];
+      if(!el) return `<line x1="${leftNode}" y1="${y}" x2="${rightNode}" y2="${y}" stroke="${wire}" stroke-width="3" stroke-linecap="round"/>`;
+      const x = this.slotCenterX(slot);
+      const leads = this.printSymbolLeadBounds(el, x);
+      return `<line x1="${leftNode}" y1="${y}" x2="${leads.left}" y2="${y}" stroke="${wire}" stroke-width="3" stroke-linecap="round"/><line x1="${leads.right}" y1="${y}" x2="${rightNode}" y2="${y}" stroke="${wire}" stroke-width="3" stroke-linecap="round"/>`;
+    },
+    printCircuitSlotsSvg(cells, start, end, y, wire){
+      const out = [];
+      for(let slot = start; slot < end; slot++) out.push(this.printCircuitSlotSvg(cells || [], slot, y, wire));
+      return out.join('');
+    },
+    printCopyAttr(text){
+      return encodeURIComponent(String(text || ''));
+    },
+    printElementText(el){
+      if(!el) return '';
+      const tag = el.tag || '(untagged)';
+      const preset = this.printPresetLabel(el);
+      if(['TON','TOF','CTU','CTD','ONS'].includes(el.type)) {
+        return `[${el.type} ${tag}${preset ? ' ' + preset : ''}]`;
+      }
+      return `[${el.type || '?'} ${tag}]`;
+    },
+    printCellRangeText(cells, start = 0, end = 8){
+      const parts = [];
+      for(let slot = start; slot < end; slot++) {
+        const text = this.printElementText(cells && cells[slot]);
+        if(text) parts.push(text);
+      }
+      return parts.length ? parts.join(' -- ') : '(empty)';
+    },
+    printRungCopyText(rung, index){
+      const kind = rung && rung.kind === 'script' ? 'AngelScript rung' : 'Ladder rung';
+      const lines = [`Rung ${index + 1} - ${kind}`];
+      if(rung && rung.comment) lines.push(`Comment: ${rung.comment}`);
+      if(rung && rung.kind === 'script') {
+        lines.push('', String(rung.code || '').trimEnd());
+        return lines.join('\n');
+      }
+      lines.push(`Main: ${this.printCellRangeText((rung && rung.main) || [], 0, 8)}`);
+      const branches = (rung && rung.branches) || [];
+      branches.forEach((br, i) => {
+        lines.push(`Branch ${i + 1} (${br.start} to ${br.end}): ${this.printCellRangeText(br.cells || [], br.start, br.end)}`);
+      });
+      return lines.join('\n');
+    },
+    printTagRole(entry){
+      if(!entry) return 'Internal';
+      if(entry.output) return 'Output';
+      if(entry.hmi || /^HMI_/i.test(entry.name || '')) return 'HMI/Input';
+      if(entry.memory || /^M_/i.test(entry.name || '')) return 'Memory';
+      if(entry.writes && !entry.reads) return 'Write';
+      if(entry.reads && !entry.writes) return 'Read';
+      return 'Read/Write';
+    },
+    printFormatTagXrefSource(source){
+      const s = String(source || '').trim();
+      let m = s.match(/^Rung\s+(\d+)\s+main\s+slot\s+(\d+)$/i);
+      if(m) return `R${m[1]} Main S${m[2]}`;
+      m = s.match(/^Rung\s+(\d+)\s+branch\s+(\d+)\s+slot\s+(\d+)$/i);
+      if(m) return `R${m[1]} Br${m[2]} S${m[3]}`;
+      m = s.match(/^Rung\s+(\d+)\s+line\s+(\d+)$/i);
+      if(m) return `R${m[1]} Line ${m[2]}`;
+      m = s.match(/^Rung\s+(\d+)$/i);
+      if(m) return `R${m[1]}`;
+      return s || '—';
+    },
+    printFormatTagXrefContext(context, access){
+      const c = String(context || '').trim();
+      const a = String(access || '').trim();
+      const contextMap = {
+        NO: 'NO contact',
+        NC: 'NC contact',
+        OUT: 'coil',
+        SET: 'set coil',
+        RST: 'reset coil',
+        'counter-control': 'counter control',
+        'script-write': 'script write',
+        'script-expression': 'script expression',
+        'script-condition': 'script condition',
+        'script-incdec': 'script inc/dec',
+        'script-local-init': 'script init',
+        script: 'script'
+      };
+      const label = contextMap[c] || c;
+      if(label && a) return `${label}, ${a}`;
+      return label || a || 'used';
+    },
+    printTagUsedInHtml(entry){
+      const xrefs = Array.isArray(entry && entry.xrefs) ? entry.xrefs : [];
+      if(xrefs.length){
+        const lines = xrefs.map(x => {
+          const where = this.escapePrintHtml(this.printFormatTagXrefSource(x.source));
+          const detail = this.escapePrintHtml(this.printFormatTagXrefContext(x.context, x.access));
+          return `<div class="xref-line"><span class="xref-where">${where}</span><span class="xref-detail">${detail}</span></div>`;
+        }).join('');
+        return `<div class="xref-list">${lines}</div>`;
+      }
+      const sources = entry && entry.sources instanceof Set ? [...entry.sources] : (Array.isArray(entry && entry.sources) ? entry.sources : []);
+      if(!sources.length) return '—';
+      return `<div class="xref-list">${sources.map(source => `<div class="xref-line"><span class="xref-where">${this.escapePrintHtml(this.printFormatTagXrefSource(source))}</span></div>`).join('')}</div>`;
+    },
+    printTagAppendixHtml(entries){
+      if(!entries || !entries.length) return '';
+      const rows = entries.map(entry => {
+        const row = this.normalizeTagRegistryRow(this.getTagRegistryOverride(entry.name) || this.defaultTagRegistryRow(entry));
+        const usedIn = this.printTagUsedInHtml(entry);
+        return `<tr><td class="mono">${this.escapePrintHtml(row.name)}</td><td>${this.escapePrintHtml(row.type)}</td><td>${row.retentive ? 'Yes' : 'No'}</td><td>${row.writable ? 'Yes' : 'No'}</td><td class="used-in">${usedIn}</td><td>${this.escapePrintHtml(row.description || '')}</td></tr>`;
+      }).join('');
+      return `<section class="tag-appendix"><div class="appendix-title">Tag Reference Appendix</div><table><thead><tr><th>Tag</th><th>Type</th><th>Retentive</th><th>Writable</th><th>Used In</th><th>Description</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+    },
+    printSymbolSvg(el, x, y){
+      if(!el) return '';
+      const tag = this.escapePrintHtml(el.tag || '');
+      if(el.type === 'NO') {
+        return `<g><line x1="${x-30}" y1="${y}" x2="${x-15}" y2="${y}" stroke="#111827" stroke-width="2"/><line x1="${x+15}" y1="${y}" x2="${x+30}" y2="${y}" stroke="#111827" stroke-width="2"/><line x1="${x-15}" y1="${y-20}" x2="${x-15}" y2="${y+20}" stroke="#0369a1" stroke-width="3"/><line x1="${x+15}" y1="${y-20}" x2="${x+15}" y2="${y+20}" stroke="#0369a1" stroke-width="3"/><text x="${x}" y="${y+41}" text-anchor="middle" fill="#111827" font-size="11" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">${tag}</text></g>`;
+      }
+      if(el.type === 'NC') {
+        return `<g><line x1="${x-30}" y1="${y}" x2="${x-15}" y2="${y}" stroke="#111827" stroke-width="2"/><line x1="${x+15}" y1="${y}" x2="${x+30}" y2="${y}" stroke="#111827" stroke-width="2"/><line x1="${x-15}" y1="${y-20}" x2="${x-15}" y2="${y+20}" stroke="#b91c1c" stroke-width="3"/><line x1="${x+15}" y1="${y-20}" x2="${x+15}" y2="${y+20}" stroke="#b91c1c" stroke-width="3"/><line x1="${x-22}" y1="${y+20}" x2="${x+22}" y2="${y-20}" stroke="#b91c1c" stroke-width="2"/><text x="${x}" y="${y+41}" text-anchor="middle" fill="#111827" font-size="11" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">${tag}</text></g>`;
+      }
+      if(['OUT','SET','RST'].includes(el.type)) {
+        const color = this.printCoilColor(el.type);
+        const label = el.type === 'SET' ? 'S' : (el.type === 'RST' ? 'R' : '');
+        return `<g><line x1="${x-30}" y1="${y}" x2="${x-17}" y2="${y}" stroke="#111827" stroke-width="2"/><line x1="${x+17}" y1="${y}" x2="${x+30}" y2="${y}" stroke="#111827" stroke-width="2"/><path d="M ${x-10} ${y-21} Q ${x-24} ${y} ${x-10} ${y+21}" fill="none" stroke="${color}" stroke-width="3"/><path d="M ${x+10} ${y-21} Q ${x+24} ${y} ${x+10} ${y+21}" fill="none" stroke="${color}" stroke-width="3"/>${label ? `<text x="${x}" y="${y+4}" text-anchor="middle" fill="${color}" font-size="13" font-weight="900">${label}</text>` : ''}<text x="${x}" y="${y+41}" text-anchor="middle" fill="#111827" font-size="11" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">${tag}</text></g>`;
+      }
+      const color = this.printBlockColor(el.type);
+      const preset = this.escapePrintHtml(this.printPresetLabel(el));
+      const type = this.escapePrintHtml(el.type || '');
+      return `<g><rect x="${x-31}" y="${y-24}" width="62" height="48" rx="8" fill="#ffffff" stroke="${color}" stroke-width="2"/><text x="${x}" y="${y-4}" text-anchor="middle" fill="${color}" font-size="13" font-weight="800">${type}</text><text x="${x}" y="${y+9}" text-anchor="middle" fill="#4b5563" font-size="9">${preset}</text><text x="${x}" y="${y+41}" text-anchor="middle" fill="#111827" font-size="11" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">${tag}</text></g>`;
+    },
+    printLadderRungSvg(rung){
+      const h = this.rungHeight(rung);
+      const rail = '#111827';
+      const wire = '#374151';
+      let out = [];
+      out.push(`<svg class="print-ladder-svg" viewBox="0 0 ${this.canvasW} ${h}" preserveAspectRatio="xMinYMin meet" role="img" aria-label="Ladder rung diagram">`);
+      out.push(`<rect x="0" y="0" width="${this.canvasW}" height="${h}" rx="10" fill="#ffffff"/>`);
+      out.push(`<line x1="${this.railLeft}" y1="24" x2="${this.railLeft}" y2="${h-24}" stroke="${rail}" stroke-width="3"/>`);
+      out.push(`<line x1="${this.railRight}" y1="24" x2="${this.railRight}" y2="${h-24}" stroke="${rail}" stroke-width="3"/>`);
+      out.push(`<line x1="${this.railLeft}" y1="${this.mainY}" x2="${this.nodeX(0)}" y2="${this.mainY}" stroke="${wire}" stroke-width="3" stroke-linecap="round"/>`);
+      out.push(this.printCircuitSlotsSvg(rung.main || [], 0, 8, this.mainY, wire));
+      out.push(`<line x1="${this.nodeX(8)}" y1="${this.mainY}" x2="${this.railRight}" y2="${this.mainY}" stroke="${wire}" stroke-width="3" stroke-linecap="round"/>`);
+      for(const br of (rung.branches || [])) {
+        const by = this.branchY(rung, br);
+        out.push(`<line x1="${this.nodeX(br.start)}" y1="${this.mainY}" x2="${this.nodeX(br.start)}" y2="${by}" stroke="${wire}" stroke-width="3" stroke-linecap="round"/>`);
+        out.push(`<line x1="${this.nodeX(br.end)}" y1="${this.mainY}" x2="${this.nodeX(br.end)}" y2="${by}" stroke="${wire}" stroke-width="3" stroke-linecap="round"/>`);
+        if(br.start === 0) out.push(`<line x1="${this.railLeft}" y1="${by}" x2="${this.nodeX(0)}" y2="${by}" stroke="${wire}" stroke-width="3" stroke-linecap="round"/>`);
+        if(br.end === 8) out.push(`<line x1="${this.nodeX(8)}" y1="${by}" x2="${this.railRight}" y2="${by}" stroke="${wire}" stroke-width="3" stroke-linecap="round"/>`);
+        out.push(this.printCircuitSlotsSvg(br.cells || [], br.start, br.end, by, wire));
+        out.push(`<circle cx="${this.nodeX(br.start)}" cy="${this.mainY}" r="4.2" fill="#374151"/><circle cx="${this.nodeX(br.end)}" cy="${this.mainY}" r="4.2" fill="#374151"/><circle cx="${this.nodeX(br.start)}" cy="${by}" r="3.8" fill="#374151"/><circle cx="${this.nodeX(br.end)}" cy="${by}" r="3.8" fill="#374151"/>`);
+      }
+      out.push(`<circle cx="${this.railLeft}" cy="${this.mainY}" r="4" fill="${rail}"/><circle cx="${this.railRight}" cy="${this.mainY}" r="4" fill="${rail}"/>`);
+      for(const n of this.nodes) out.push(`<circle cx="${this.nodeX(n)}" cy="${this.mainY}" r="3.2" fill="#4b5563"/>`);
+      for(const slot of this.slots) if(rung.main && rung.main[slot]) out.push(this.printSymbolSvg(rung.main[slot], this.slotCenterX(slot), this.mainY));
+      for(const br of (rung.branches || [])) {
+        const by = this.branchY(rung, br);
+        for(const slot of this.branchSlots(br)) if(br.cells && br.cells[slot]) out.push(this.printSymbolSvg(br.cells[slot], this.slotCenterX(slot), by));
+      }
+      out.push('</svg>');
+      return out.join('');
+    },
+    openLadderPrintView(){
+      const project = this.project || {};
+      const generatedAt = new Date().toLocaleString();
+      const ladderCount = (project.rungs || []).filter(r => r.kind !== 'script').length;
+      const scriptCount = (project.rungs || []).filter(r => r.kind === 'script').length;
+      const fileName = this.ladderStore.currentFileName || this.ladderFileNameDraft || 'Unsaved ladder project';
+      const desc = String(project.description || '').trim();
+      const tagEntries = this.discoverTagRegistryEntries();
+      const tagAppendix = this.printTagAppendixHtml(tagEntries);
+      const sections = (project.rungs || []).map((rung, idx) => {
+        const comment = this.escapePrintHtml(rung.comment || 'No comment');
+        const kind = rung.kind === 'script' ? 'AngelScript rung' : 'Ladder rung';
+        if(rung.kind === 'script') {
+          const copyText = this.printCopyAttr(this.printRungCopyText(rung, idx));
+          return `<section class="print-rung script-rung"><div class="rung-head"><div><span class="rung-index">Rung ${idx + 1}</span><span class="rung-kind">${kind}</span></div><div class="rung-comment">${comment}</div><div class="rung-actions"><button class="copy-rung" type="button" data-copy="${copyText}" onclick="copyPrintRungImage(this)">Copy Image</button></div></div><pre class="script-code"><code>${this.syntaxHighlightAngelScript(rung.code || '')}</code></pre></section>`;
+        }
+        const copyText = this.printCopyAttr(this.printRungCopyText(rung, idx));
+        return `<section class="print-rung"><div class="rung-head"><div><span class="rung-index">Rung ${idx + 1}</span><span class="rung-kind">${kind}</span></div><div class="rung-comment">${comment}</div><div class="rung-actions"><button class="copy-rung" type="button" data-copy="${copyText}" onclick="copyPrintRungImage(this)">Copy Image</button></div></div>${this.printLadderRungSvg(rung)}</section>`;
+      }).join('');
+      const html = `<!doctype html><html><head><meta charset="utf-8"><title>${this.escapePrintHtml(project.name || 'PiLab Ladder Print')}</title><style>
+        :root { color-scheme: light; }
+        * { box-sizing: border-box; }
+        body { margin: 0; background: #e5e7eb; color: #111827; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+        .toolbar { position: sticky; top: 0; z-index: 10; display: flex; justify-content: space-between; align-items: center; gap: 18px; padding: 12px 20px; background: #111827; color: #f9fafb; box-shadow: 0 8px 24px rgba(15, 23, 42, .22); }
+        .toolbar-title { font-weight: 900; }
+        .toolbar-note { margin-top: 2px; font-size: 12px; color: #cbd5e1; }
+        .toolbar-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+        .toolbar label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #e5e7eb; white-space: nowrap; }
+        .toolbar input { accent-color: #38bdf8; }
+        .toolbar button { border: 1px solid rgba(255,255,255,.28); background: #ffffff; color: #111827; border-radius: 12px; padding: 9px 14px; font-weight: 800; cursor: pointer; }
+        .paper { max-width: 1040px; margin: 24px auto; background: #ffffff; box-shadow: 0 24px 70px rgba(15,23,42,.18); border-radius: 18px; overflow: hidden; }
+        .doc-header { padding: 34px 42px 24px; border-bottom: 1px solid #d1d5db; background: linear-gradient(135deg, #ffffff 0%, #f8fafc 58%, #eef2ff 100%); }
+        .brand { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
+        .brand-mark { letter-spacing: .20em; font-size: 11px; font-weight: 900; color: #1d4ed8; text-transform: uppercase; }
+        h1 { margin: 0; font-size: 30px; line-height: 1.15; letter-spacing: -0.03em; }
+        .subtitle { margin-top: 7px; color: #4b5563; font-size: 13px; }
+        .description { margin: 16px 0 0; max-width: 860px; color: #374151; line-height: 1.5; }
+        .print-advice { margin-top: 16px; padding: 10px 12px; border: 1px solid #bfdbfe; border-radius: 12px; background: #eff6ff; color: #1e3a8a; font-size: 12px; line-height: 1.45; }
+        .meta-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; padding: 18px 42px; border-bottom: 1px solid #e5e7eb; background: #f9fafb; }
+        .meta { border: 1px solid #e5e7eb; background: #ffffff; border-radius: 12px; padding: 10px 12px; min-width: 0; }
+        .meta-label { color: #6b7280; font-size: 10px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; }
+        .meta-value { margin-top: 3px; font-size: 13px; font-weight: 800; overflow-wrap: anywhere; }
+        .content { padding: 22px 42px 36px; }
+        .print-rung { break-inside: avoid; page-break-inside: avoid; margin: 0 0 20px; border: 1px solid #d1d5db; border-radius: 14px; overflow: hidden; background: #ffffff; }
+        .rung-head { display: grid; grid-template-columns: 190px 1fr auto; gap: 14px; align-items: start; padding: 12px 14px; border-bottom: 1px solid #e5e7eb; background: #f8fafc; }
+        .rung-index { display: inline-block; font-weight: 900; color: #111827; margin-right: 8px; }
+        .rung-kind { display: inline-block; font-size: 10px; font-weight: 900; color: #1d4ed8; text-transform: uppercase; letter-spacing: .11em; }
+        .rung-comment { color: #374151; font-size: 13px; font-weight: 650; line-height: 1.4; }
+        .rung-actions { display: flex; justify-content: flex-end; }
+        .copy-rung { border: 1px solid #cbd5e1; background: #ffffff; color: #1f2937; border-radius: 10px; padding: 6px 10px; font-size: 11px; font-weight: 850; cursor: pointer; white-space: nowrap; box-shadow: 0 1px 2px rgba(15,23,42,.06); }
+        .copy-rung:hover { border-color: #60a5fa; color: #1d4ed8; }
+        .print-ladder-svg { display: block; width: 100%; height: auto; background: white; }
+        .script-rung { border-color: #c7d2fe; }
+        .script-code { margin: 0; padding: 16px 18px; background: #ffffff; color: #111827; overflow-x: auto; font-size: 12px; line-height: 1.55; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; white-space: pre-wrap; border-top: 1px solid #e5e7eb; }
+        .tok-comment { color: #64748b; font-style: italic; }
+        .tok-keyword { color: #1d4ed8; font-weight: 800; }
+        .tok-string { color: #047857; }
+        .tok-number { color: #92400e; }
+        .tag-appendix { break-before: page; page-break-before: always; margin-top: 28px; }
+        .appendix-title { margin: 0 0 12px; font-size: 20px; font-weight: 950; letter-spacing: -.02em; color: #111827; }
+        .tag-appendix table { width: 100%; border-collapse: collapse; font-size: 11px; }
+        .tag-appendix th { text-align: left; padding: 8px 7px; color: #1f2937; background: #f1f5f9; border: 1px solid #d1d5db; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+        .tag-appendix td { vertical-align: top; padding: 7px; border: 1px solid #e5e7eb; color: #374151; line-height: 1.35; }
+        .tag-appendix .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; color: #111827; font-weight: 800; }
+        .tag-appendix .used-in { min-width: 142px; }
+        .xref-list { display: grid; gap: 3px; }
+        .xref-line { display: grid; grid-template-columns: 68px 1fr; gap: 6px; align-items: baseline; }
+        .xref-where { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; color: #111827; font-weight: 850; white-space: nowrap; }
+        .xref-detail { color: #475569; }
+        .footer { padding: 14px 42px 24px; color: #6b7280; font-size: 11px; border-top: 1px solid #e5e7eb; }
+        body.compact .doc-header { padding-top: 24px; padding-bottom: 18px; }
+        body.compact h1 { font-size: 24px; }
+        body.compact .content { padding-top: 16px; padding-bottom: 22px; }
+        body.compact .print-rung { margin-bottom: 12px; border-radius: 10px; }
+        body.compact .rung-head { padding: 8px 12px; }
+        body.compact .print-ladder-svg { max-height: 108px; }
+        body.mono .brand-mark, body.mono .rung-kind { color: #111827; }
+        body.mono .doc-header { background: #ffffff; }
+        body.mono .print-advice { background: #ffffff; color: #111827; border-color: #9ca3af; }
+        body.mono .script-code { background: #ffffff; color: #111827; border-top: 1px solid #d1d5db; }
+        body.mono .tok-comment, body.mono .tok-keyword, body.mono .tok-string, body.mono .tok-number { color: #111827; }
+        body.mono svg * { stroke: #111827 !important; fill: none; }
+        body.mono svg text { fill: #111827 !important; stroke: none !important; }
+        body.mono svg rect { fill: #ffffff !important; }
+        @media print {
+          @page { margin: 0.45in; }
+          body { background: #ffffff; }
+          .toolbar, .print-advice, .copy-rung { display: none !important; }
+          .paper { max-width: none; margin: 0; box-shadow: none; border-radius: 0; }
+          .doc-header, .meta-grid, .content, .footer { padding-left: 0; padding-right: 0; }
+          .meta-grid { grid-template-columns: repeat(5, 1fr); }
+          .print-rung { margin-bottom: 16px; }
+          body.compact .print-rung { margin-bottom: 10px; }
+          .script-code, .doc-header, .meta, .rung-head { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+        }
+      </style><script>
+        function setCopyStatus(btn, text, delay) {
+          const original = btn.getAttribute('data-original-label') || btn.textContent;
+          btn.setAttribute('data-original-label', original);
+          btn.textContent = text;
+          window.setTimeout(function(){ btn.textContent = original; }, delay || 1400);
+        }
+        function copyPlainTextFallback(btn) {
+          const text = decodeURIComponent(btn.getAttribute('data-copy') || '');
+          if(navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(text).then(function(){ return 'Copied Text'; }).catch(function(){ return legacyCopyText(text); });
+          }
+          return legacyCopyText(text);
+        }
+        function legacyCopyText(text) {
+          return new Promise(function(resolve, reject) {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.setAttribute('readonly', '');
+            area.style.position = 'fixed';
+            area.style.left = '-9999px';
+            area.style.top = '0';
+            document.body.appendChild(area);
+            area.focus();
+            area.select();
+            try {
+              const ok = document.execCommand('copy');
+              document.body.removeChild(area);
+              ok ? resolve('Copied Text') : reject(new Error('execCommand copy returned false'));
+            } catch (err) {
+              document.body.removeChild(area);
+              reject(err);
+            }
+          });
+        }
+        function cloneSvgForCopy(svg) {
+          const clone = svg.cloneNode(true);
+          clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+          const box = svg.viewBox && svg.viewBox.baseVal ? svg.viewBox.baseVal : null;
+          const width = box && box.width ? box.width : Math.ceil(svg.getBoundingClientRect().width || 820);
+          const height = box && box.height ? box.height : Math.ceil(svg.getBoundingClientRect().height || 140);
+          clone.setAttribute('width', String(width));
+          clone.setAttribute('height', String(height));
+          clone.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+          return { clone: clone, width: width, height: height };
+        }
+        function svgToPngBlob(svg, width, height) {
+          return new Promise(function(resolve, reject) {
+            const serialized = new XMLSerializer().serializeToString(svg);
+            const blob = new Blob([serialized], { type: 'image/svg+xml;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            img.onload = function() {
+              try {
+                const scale = Math.max(2, Math.min(3, window.devicePixelRatio || 2));
+                const canvas = document.createElement('canvas');
+                canvas.width = Math.ceil(width * scale);
+                canvas.height = Math.ceil(height * scale);
+                const ctx = canvas.getContext('2d');
+                ctx.scale(scale, scale);
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, width, height);
+                ctx.drawImage(img, 0, 0, width, height);
+                URL.revokeObjectURL(url);
+                canvas.toBlob(function(pngBlob) {
+                  pngBlob ? resolve(pngBlob) : reject(new Error('PNG encode failed'));
+                }, 'image/png');
+              } catch (err) {
+                URL.revokeObjectURL(url);
+                reject(err);
+              }
+            };
+            img.onerror = function() { URL.revokeObjectURL(url); reject(new Error('SVG image load failed')); };
+            img.src = url;
+          });
+        }
+        function scriptRungToPngBlob(section) {
+          return new Promise(function(resolve, reject) {
+            try {
+              const rect = section.getBoundingClientRect();
+              const width = Math.max(760, Math.ceil(rect.width || 900));
+              const codeEl = section.querySelector('.script-code');
+              const title = (section.querySelector('.rung-index') ? section.querySelector('.rung-index').textContent : 'Script Rung') + '  ' + (section.querySelector('.rung-kind') ? section.querySelector('.rung-kind').textContent : 'ANGELSCRIPT RUNG');
+              const comment = section.querySelector('.rung-comment') ? section.querySelector('.rung-comment').textContent : '';
+              const code = codeEl ? codeEl.innerText : '';
+              const lines = code.replace(/\r/g, '').split('\n');
+              const lineHeight = 18;
+              const height = Math.max(150, 76 + lines.length * lineHeight + 28);
+              const scale = Math.max(2, Math.min(3, window.devicePixelRatio || 2));
+              const canvas = document.createElement('canvas');
+              canvas.width = Math.ceil(width * scale);
+              canvas.height = Math.ceil(height * scale);
+              const ctx = canvas.getContext('2d');
+              ctx.scale(scale, scale);
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(0, 0, width, height);
+              ctx.strokeStyle = '#c7d2fe';
+              ctx.lineWidth = 1;
+              ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+              ctx.fillStyle = '#f8fafc';
+              ctx.fillRect(1, 1, width - 2, 52);
+              ctx.strokeStyle = '#e5e7eb';
+              ctx.beginPath();
+              ctx.moveTo(0, 52.5);
+              ctx.lineTo(width, 52.5);
+              ctx.stroke();
+              ctx.fillStyle = '#111827';
+              ctx.font = 'bold 16px ui-sans-serif, system-ui, sans-serif';
+              ctx.fillText(title, 16, 24);
+              ctx.fillStyle = '#374151';
+              ctx.font = 'bold 13px ui-sans-serif, system-ui, sans-serif';
+              ctx.fillText(comment, 16, 43);
+              ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+              let y = 78;
+              lines.forEach(function(line) {
+                const trimmed = line.trim();
+                if(trimmed.startsWith('//')) ctx.fillStyle = '#64748b';
+                else if(/\b(if|else|for|while|return|true|false)\b/.test(line)) ctx.fillStyle = '#1d4ed8';
+                else ctx.fillStyle = '#111827';
+                ctx.fillText(line, 18, y);
+                y += lineHeight;
+              });
+              canvas.toBlob(function(blob) { blob ? resolve(blob) : reject(new Error('PNG encode failed')); }, 'image/png');
+            } catch (err) { reject(err); }
+          });
+        }
+        async function writeImageBlobToClipboard(blob) {
+          if(!(navigator.clipboard && navigator.clipboard.write && window.ClipboardItem)) {
+            throw new Error('Image clipboard API unavailable');
+          }
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+        }
+        async function copyPrintRungImage(btn) {
+          btn.textContent = 'Copying...';
+          try {
+            const section = btn.closest('.print-rung');
+            if(!section) throw new Error('Rung element not found');
+            const rungSvg = section.querySelector('.print-ladder-svg');
+            let pngBlob;
+            if(rungSvg) {
+              const prepared = cloneSvgForCopy(rungSvg);
+              pngBlob = await svgToPngBlob(prepared.clone, prepared.width, prepared.height);
+            } else {
+              pngBlob = await scriptRungToPngBlob(section);
+            }
+            await writeImageBlobToClipboard(pngBlob);
+            setCopyStatus(btn, 'Copied Image', 1400);
+          } catch (err) {
+            console.warn('PiLab Copy Image fell back to text:', err);
+            try {
+              const status = await copyPlainTextFallback(btn);
+              setCopyStatus(btn, status, 1600);
+            } catch (fallbackErr) {
+              console.warn('PiLab Copy Text fallback failed:', fallbackErr);
+              setCopyStatus(btn, 'Copy Failed', 1800);
+            }
+          }
+        }
+      <\/script></head><body><div class="toolbar"><div><div class="toolbar-title">PiLab Ladder Print Preview</div><div class="toolbar-note">Use Copy Image to place a rung visualization on the clipboard. For the cleanest PDF, disable browser Headers and footers in the print dialog.</div></div><div class="toolbar-actions"><label><input type="checkbox" onchange="document.body.classList.toggle('compact', this.checked)"> Compact</label><label><input type="checkbox" onchange="document.body.classList.toggle('mono', this.checked)"> Monochrome</label><button onclick="window.print()">Print / Save PDF</button></div></div><main class="paper"><header class="doc-header"><div class="brand"><div class="brand-mark">PiLab PLC Ladder Documentation</div><div class="subtitle">Generated ${this.escapePrintHtml(generatedAt)}</div></div><h1>${this.escapePrintHtml(project.name || 'Untitled Ladder Program')}</h1><div class="subtitle">${this.escapePrintHtml(fileName)}</div>${desc ? `<p class="description">${this.escapePrintHtml(desc)}</p>` : ''}<div class="print-advice"><strong>Print tip:</strong> In Chrome/Edge, turn off <em>Headers and footers</em> for a clean generated PDF without the browser URL/date/footer text.</div></header><section class="meta-grid"><div class="meta"><div class="meta-label">Scan Time</div><div class="meta-value">${this.escapePrintHtml(project.scan_ms || 0)} ms</div></div><div class="meta"><div class="meta-label">Total Rungs</div><div class="meta-value">${(project.rungs || []).length}</div></div><div class="meta"><div class="meta-label">Ladder</div><div class="meta-value">${ladderCount}</div></div><div class="meta"><div class="meta-label">AngelScript</div><div class="meta-value">${scriptCount}</div></div><div class="meta"><div class="meta-label">Tags</div><div class="meta-value">${tagEntries.length}</div></div></section><section class="content">${sections || '<p>No rungs to print.</p>'}${tagAppendix}</section><footer class="footer">Generated from the PiLab browser Ladder editor. Logic shown without editor controls, slots, drag targets, or simulation overlays.</footer></main></body></html>`;
+      const win = window.open('', '_blank');
+      if(!win) { this.show('Popup blocked. Allow popups to open the print preview.'); return; }
+      win.document.open();
+      win.document.write(html);
+      win.document.close();
+
+      const setPrintCopyStatus = (btn, label, delay = 1500) => {
+        const original = btn.getAttribute('data-original-label') || btn.textContent || 'Copy Image';
+        btn.setAttribute('data-original-label', original);
+        btn.textContent = label;
+        win.setTimeout(() => { btn.textContent = original; }, delay);
+      };
+
+      const legacyCopyTextFromPrintWindow = (text) => {
+        const area = win.document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.left = '-9999px';
+        area.style.top = '0';
+        win.document.body.appendChild(area);
+        area.focus();
+        area.select();
+        let ok = false;
+        try { ok = win.document.execCommand('copy'); }
+        finally { win.document.body.removeChild(area); }
+        if(!ok) throw new Error('Text clipboard fallback failed');
+      };
+
+      const writeTextFromPrintWindow = async (text) => {
+        if(navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+          try {
+            await navigator.clipboard.writeText(text);
+            return;
+          } catch (err) {
+            // Fall through to the older selection-based copy path.
+          }
+        }
+        legacyCopyTextFromPrintWindow(text);
+      };
+
+      const svgElementToPngBlob = (svg) => new Promise((resolve, reject) => {
+        try {
+          const box = svg.viewBox && svg.viewBox.baseVal ? svg.viewBox.baseVal : null;
+          const width = box && box.width ? box.width : Math.ceil(svg.getBoundingClientRect().width || 820);
+          const height = box && box.height ? box.height : Math.ceil(svg.getBoundingClientRect().height || 140);
+          const clone = svg.cloneNode(true);
+          clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+          clone.setAttribute('width', String(width));
+          clone.setAttribute('height', String(height));
+          clone.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+          const serialized = new XMLSerializer().serializeToString(clone);
+          const blob = new Blob([serialized], { type: 'image/svg+xml;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const img = new Image();
+          img.onload = () => {
+            try {
+              const scale = Math.max(2, Math.min(3, window.devicePixelRatio || 2));
+              const canvas = win.document.createElement('canvas');
+              canvas.width = Math.ceil(width * scale);
+              canvas.height = Math.ceil(height * scale);
+              const ctx = canvas.getContext('2d');
+              ctx.scale(scale, scale);
+              ctx.fillStyle = '#ffffff';
+              ctx.fillRect(0, 0, width, height);
+              ctx.drawImage(img, 0, 0, width, height);
+              URL.revokeObjectURL(url);
+              canvas.toBlob((pngBlob) => pngBlob ? resolve({ blob: pngBlob, dataUrl: canvas.toDataURL('image/png') }) : reject(new Error('PNG encode failed')), 'image/png');
+            } catch (err) {
+              URL.revokeObjectURL(url);
+              reject(err);
+            }
+          };
+          img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('SVG image load failed')); };
+          img.src = url;
+        } catch (err) {
+          reject(err);
+        }
+      });
+
+      const scriptElementToPngBlob = (section) => new Promise((resolve, reject) => {
+        try {
+          const rect = section.getBoundingClientRect();
+          const width = Math.max(760, Math.ceil(rect.width || 900));
+          const codeEl = section.querySelector('.script-code');
+          const title = ((section.querySelector('.rung-index') || {}).textContent || 'Script Rung') + '  ' + ((section.querySelector('.rung-kind') || {}).textContent || 'ANGELSCRIPT RUNG');
+          const comment = (section.querySelector('.rung-comment') || {}).textContent || '';
+          const code = codeEl ? codeEl.innerText : '';
+          const lines = code.replace(/\r/g, '').split('\n');
+          const lineHeight = 18;
+          const height = Math.max(150, 76 + lines.length * lineHeight + 28);
+          const scale = Math.max(2, Math.min(3, window.devicePixelRatio || 2));
+          const canvas = win.document.createElement('canvas');
+          canvas.width = Math.ceil(width * scale);
+          canvas.height = Math.ceil(height * scale);
+          const ctx = canvas.getContext('2d');
+          ctx.scale(scale, scale);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, width, height);
+          ctx.strokeStyle = '#c7d2fe';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(0.5, 0.5, width - 1, height - 1);
+          ctx.fillStyle = '#f8fafc';
+          ctx.fillRect(1, 1, width - 2, 52);
+          ctx.strokeStyle = '#e5e7eb';
+          ctx.beginPath();
+          ctx.moveTo(0, 52.5);
+          ctx.lineTo(width, 52.5);
+          ctx.stroke();
+          ctx.fillStyle = '#111827';
+          ctx.font = 'bold 16px ui-sans-serif, system-ui, sans-serif';
+          ctx.fillText(title, 16, 24);
+          ctx.fillStyle = '#374151';
+          ctx.font = 'bold 13px ui-sans-serif, system-ui, sans-serif';
+          ctx.fillText(comment, 16, 43);
+          ctx.font = '12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+          let y = 78;
+          lines.forEach((line) => {
+            const trimmed = line.trim();
+            if(trimmed.startsWith('//')) ctx.fillStyle = '#64748b';
+            else if(/\b(if|else|for|while|return|true|false)\b/.test(line)) ctx.fillStyle = '#1d4ed8';
+            else ctx.fillStyle = '#111827';
+            ctx.fillText(line, 18, y);
+            y += lineHeight;
+          });
+          canvas.toBlob((blob) => blob ? resolve({ blob, dataUrl: canvas.toDataURL('image/png') }) : reject(new Error('PNG encode failed')), 'image/png');
+        } catch (err) {
+          reject(err);
+        }
+      });
+
+      const execCommandCopyImage = (dataUrl) => {
+        const box = win.document.createElement('div');
+        box.contentEditable = 'true';
+        box.style.position = 'fixed';
+        box.style.left = '-9999px';
+        box.style.top = '0';
+        box.style.width = '1px';
+        box.style.height = '1px';
+        box.innerHTML = '<img src="' + dataUrl + '" alt="PiLab rung image">';
+        win.document.body.appendChild(box);
+        const range = win.document.createRange();
+        range.selectNodeContents(box);
+        const selection = win.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        const ok = win.document.execCommand('copy');
+        selection.removeAllRanges();
+        win.document.body.removeChild(box);
+        if(!ok) throw new Error('Image clipboard fallback failed');
+      };
+
+      const writeImageFromPrintWindow = async (payload) => {
+        if(navigator.clipboard && navigator.clipboard.write && window.ClipboardItem && window.isSecureContext) {
+          try {
+            await navigator.clipboard.write([new ClipboardItem({ 'image/png': payload.blob })]);
+            return;
+          } catch (err) {
+            // Fall through to the older rich HTML image copy path.
+          }
+        }
+        execCommandCopyImage(payload.dataUrl);
+      };
+
+      win.document.querySelectorAll('.copy-rung').forEach((btn) => {
+        btn.removeAttribute('onclick');
+        btn.addEventListener('click', async () => {
+          setPrintCopyStatus(btn, 'Copying...', 200000);
+          const section = btn.closest('.print-rung');
+          try {
+            if(!section) throw new Error('Rung element not found');
+            const rungSvg = section.querySelector('.print-ladder-svg');
+            const payload = rungSvg ? await svgElementToPngBlob(rungSvg) : await scriptElementToPngBlob(section);
+            await writeImageFromPrintWindow(payload);
+            setPrintCopyStatus(btn, 'Copied Image', 1500);
+          } catch (err) {
+            try {
+              await writeTextFromPrintWindow(decodeURIComponent(btn.getAttribute('data-copy') || ''));
+              setPrintCopyStatus(btn, 'Copied Text', 1600);
+            } catch (fallbackErr) {
+              setPrintCopyStatus(btn, 'Copy Failed', 2000);
+              console.warn('PiLab copy rung failed', err, fallbackErr);
+            }
+          }
+        });
+      });
+
+      win.focus();
     },
     show(m){ this.toast=m; setTimeout(()=>this.toast='',1500); },
     blankLadderProject(){

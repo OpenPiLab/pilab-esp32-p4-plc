@@ -63,7 +63,7 @@ export const ladderTagRegistryMethods = {
   tagRegistryAddUsage(map, rawName, usage = {}){
     const name = this.tagRegistryNormalizeName(rawName);
     if(!name || this.tagRegistryIsReservedOrSystem(name)) return;
-    if(!map.has(name)) map.set(name, { name, reads:0, writes:0, hmi:false, memory:false, output:false, numeric:false, sources:new Set(), contexts:new Set() });
+    if(!map.has(name)) map.set(name, { name, reads:0, writes:0, hmi:false, memory:false, output:false, numeric:false, sources:new Set(), contexts:new Set(), xrefs:[] });
     const item = map.get(name);
     if(usage.read) item.reads++;
     if(usage.write) item.writes++;
@@ -73,6 +73,12 @@ export const ladderTagRegistryMethods = {
     if(usage.numeric) item.numeric = true;
     if(usage.source) item.sources.add(usage.source);
     if(usage.context) item.contexts.add(usage.context);
+    if(usage.source){
+      const access = usage.read && usage.write ? 'read/write' : (usage.write ? 'write' : (usage.read ? 'read' : 'used'));
+      const xref = { source:String(usage.source), context:String(usage.context || ''), access };
+      const key = `${xref.source}|${xref.context}|${xref.access}`;
+      if(!item.xrefs.some(existing => `${existing.source}|${existing.context}|${existing.access}` === key)) item.xrefs.push(xref);
+    }
   },
 
   tagRegistryExpressionTags(expr){
@@ -169,7 +175,12 @@ export const ladderTagRegistryMethods = {
       }
     }
 
-    return [...map.values()].sort((a,b)=>a.name.localeCompare(b.name));
+    return [...map.values()].map(entry => ({
+      ...entry,
+      sources: [...entry.sources],
+      contexts: [...entry.contexts],
+      xrefs: Array.isArray(entry.xrefs) ? entry.xrefs.slice() : []
+    })).sort((a,b)=>a.name.localeCompare(b.name));
   },
 
   inferTagRegistryType(entry){
