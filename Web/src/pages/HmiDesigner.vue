@@ -49,37 +49,7 @@
         </div>
     </div>
 
-    <div v-if="pageDialog.open" class="hmi-dialog-backdrop" @pointerdown.self="closePageDialog">
-        <form class="hmi-dialog" @submit.prevent="commitPageDialog">
-            <div class="hmi-dialog-header">
-                <div>
-                    <div class="hmi-dialog-kicker">HMI Page</div>
-                    <h2>{{ pageDialog.mode === 'rename' ? 'Rename Page' : 'New Page' }}</h2>
-                </div>
-                <button type="button" class="hmi-dialog-close" aria-label="Close dialog" @click="closePageDialog">×</button>
-            </div>
 
-            <label class="hmi-dialog-field">
-                <span>Page Name</span>
-                <input ref="pageDialogInput"
-                       v-model="pageDialog.name"
-                       type="text"
-                       autocomplete="off"
-                       spellcheck="false"
-                       @keydown.esc.prevent="closePageDialog">
-            </label>
-
-            <div v-if="pageDialog.error" class="hmi-dialog-error">{{ pageDialog.error }}</div>
-            <div v-else class="hmi-dialog-help">
-                {{ pageDialog.mode === 'rename' ? 'Existing widgets on this page will move with the renamed page.' : 'The new page is added to the local HMI layout.' }}
-            </div>
-
-            <div class="hmi-dialog-actions">
-                <button type="button" class="hmi-dialog-button secondary" @click="closePageDialog">Cancel</button>
-                <button type="submit" class="hmi-dialog-button primary">{{ pageDialog.mode === 'rename' ? 'Rename Page' : 'Create Page' }}</button>
-            </div>
-        </form>
-    </div>
 
     <div class="flex-1 min-h-0 flex overflow-hidden">
         <main ref="canvas"
@@ -266,10 +236,28 @@
             </div>
         </main>
 
-        <aside v-if="editMode" class="w-80 shrink-0 min-h-0 bg-slate-900 border-l border-slate-800 flex flex-col z-50">
-            <div class="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/50">
+        <aside v-if="editMode" :class="['hmi-inspector', inspectorCollapsed ? 'collapsed' : '']">
+            <button v-if="inspectorCollapsed"
+                    type="button"
+                    class="hmi-inspector-tab"
+                    title="Open Inspector"
+                    aria-label="Open Inspector"
+                    @click="setInspectorCollapsed(false)">
+                <span>Inspector</span>
+                <span aria-hidden="true">‹</span>
+            </button>
+
+            <template v-else>
+            <div class="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/50 gap-3">
                 <h2 class="text-[10px] font-black uppercase text-sky-500 tracking-widest">Inspector</h2>
-                <span v-if="selectedIndex !== null" class="text-[8px] px-2 py-0.5 bg-sky-900 text-sky-200 rounded-full font-bold">#{{ widgets[selectedIndex].id.toString().slice(-4) }}</span>
+                <div class="flex items-center gap-2">
+                    <span v-if="selectedIndex !== null" class="text-[8px] px-2 py-0.5 bg-sky-900 text-sky-200 rounded-full font-bold">#{{ widgets[selectedIndex].id.toString().slice(-4) }}</span>
+                    <button type="button"
+                            class="hmi-inspector-collapse"
+                            title="Collapse Inspector"
+                            aria-label="Collapse Inspector"
+                            @click="setInspectorCollapsed(true)">›</button>
+                </div>
             </div>
 
             <div v-if="selectedIndex !== null" class="flex-1 min-h-0 overflow-y-auto p-4 space-y-5">
@@ -465,6 +453,7 @@
                 <div>Select a component on the design surface to configure properties.</div>
                 <div class="text-[10px] text-slate-500">Tip: use PLC Tag picker to bind widgets to /api/plc_data.</div>
             </div>
+            </template>
         </aside>
     </div>
   </section>
@@ -474,6 +463,7 @@
 import { ref, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue';
 import { usePlcStore } from '../stores/plcStore';
 import { ensureTagStoreLoaded, getTagStoreNames, getTagStorePointMap } from '../stores/tagStore';
+import { confirmDialog, messageDialog, promptDialog } from '../stores/appDialog';
 
 
         const plcStore = usePlcStore();
@@ -483,6 +473,7 @@ import { ensureTagStoreLoaded, getTagStoreNames, getTagStorePointMap } from '../
         const HMI_LAYOUT_KEY = 'pilab_hmi_layout_v2';
         const HMI_PAGE_KEY = 'pilab_hmi_current_page_v1';
         const HMI_PAGES_KEY = 'pilab_hmi_pages_v1';
+        const HMI_INSPECTOR_KEY = 'pilab_hmi_inspector_collapsed_v1';
         const loadInitialEditMode = () => {
             try {
                 const saved = localStorage.getItem(HMI_MODE_KEY);
@@ -512,6 +503,15 @@ import { ensureTagStoreLoaded, getTagStoreNames, getTagStorePointMap } from '../
         };
 
         const editMode = ref(loadInitialEditMode());
+        const loadInitialInspectorCollapsed = () => {
+            try { return localStorage.getItem(HMI_INSPECTOR_KEY) === '1'; } catch {}
+            return false;
+        };
+        const inspectorCollapsed = ref(loadInitialInspectorCollapsed());
+        const setInspectorCollapsed = (collapsed) => {
+            inspectorCollapsed.value = !!collapsed;
+            try { localStorage.setItem(HMI_INSPECTOR_KEY, inspectorCollapsed.value ? '1' : '0'); } catch {}
+        };
         const canvas = ref(null);
         const widgets = ref([]);
         const hmiPages = ref(loadInitialPages());
@@ -533,8 +533,6 @@ import { ensureTagStoreLoaded, getTagStoreNames, getTagStorePointMap } from '../
             return 'Main';
         };
         const currentPage = ref(loadInitialPage());
-        const pageDialogInput = ref(null);
-        const pageDialog = ref({ open: false, mode: 'add', name: '', originalName: '', error: '' });
 
         const controlTypes = ['gauge', 'readout', 'tank', 'led', 'trend', 'thermometer', 'toggle', 'button', 'setpoint', 'table'];
         let startX, startY, initialX, initialY, initialW, initialH;
@@ -557,6 +555,9 @@ import { ensureTagStoreLoaded, getTagStoreNames, getTagStorePointMap } from '../
         };
 
         watch(editMode, persistEditMode);
+        watch(inspectorCollapsed, (collapsed) => {
+            try { localStorage.setItem(HMI_INSPECTOR_KEY, collapsed ? '1' : '0'); } catch {}
+        });
         const persistPages = () => {
             try { localStorage.setItem(HMI_PAGES_KEY, JSON.stringify(uniquePageList(hmiPages.value))); } catch {}
         };
@@ -650,66 +651,72 @@ import { ensureTagStoreLoaded, getTagStoreNames, getTagStorePointMap } from '../
             }
             return name;
         };
-        const openPageDialog = (mode) => {
-            const isRename = mode === 'rename';
-            if (isRename && currentPage.value === 'Main') return;
-            pageDialog.value = {
-                open: true,
-                mode: isRename ? 'rename' : 'add',
-                name: isRename ? currentPage.value : nextPageName(),
-                originalName: isRename ? currentPage.value : '',
-                error: ''
-            };
-            nextTick(() => {
-                pageDialogInput.value?.focus();
-                pageDialogInput.value?.select();
-            });
-        };
-        const closePageDialog = () => {
-            pageDialog.value.open = false;
-            pageDialog.value.error = '';
-        };
-        const validatePageDialogName = () => {
-            const name = normalizePageName(pageDialog.value.name);
-            const from = pageDialog.value.originalName;
-            if (!name) return 'Enter a page name.';
-            if (pageDialog.value.mode === 'rename' && name === from) return '';
-            if (name === 'Main') return 'Main is the protected default page.';
-            if (pageNames.value.includes(name)) return `A page named "${name}" already exists.`;
+        const validatePageName = (name, mode = 'add', originalName = '') => {
+            const normalized = normalizePageName(name);
+            if (!normalized) return 'Enter a page name.';
+            if (mode === 'rename' && normalized === originalName) return '';
+            if (normalized === 'Main') return 'Main is the protected default page.';
+            if (pageNames.value.includes(normalized)) return `A page named "${normalized}" already exists.`;
             return '';
         };
-        const commitPageDialog = () => {
-            const name = normalizePageName(pageDialog.value.name);
-            const error = validatePageDialogName();
-            if (error) {
-                pageDialog.value.error = error;
-                nextTick(() => pageDialogInput.value?.focus());
+        const openPageDialog = async (mode) => {
+            const isRename = mode === 'rename';
+            if (isRename && currentPage.value === 'Main') return;
+            if (isRename) {
+                const from = currentPage.value;
+                const name = await promptDialog({
+                    kicker: 'HMI Page',
+                    title: 'Rename Page',
+                    label: 'Page Name',
+                    initialValue: from,
+                    confirmText: 'Rename Page',
+                    help: 'Existing widgets on this page will move with the renamed page.',
+                    validator: (value) => validatePageName(value, 'rename', from)
+                });
+                if (name === null) return;
+                const normalized = normalizePageName(name);
+                if (normalized && normalized !== from) {
+                    widgets.value.forEach(w => {
+                        if (normalizePageName(w.props?.page) === from) w.props.page = normalized;
+                    });
+                    hmiPages.value = uniquePageList(hmiPages.value.map(page => normalizePageName(page) === from ? normalized : page));
+                    currentPage.value = normalized;
+                    selectedIndex.value = null;
+                }
                 return;
             }
-            if (pageDialog.value.mode === 'rename') {
-                const from = pageDialog.value.originalName;
-                if (name && name !== from) {
-                    widgets.value.forEach(w => {
-                        if (normalizePageName(w.props?.page) === from) w.props.page = name;
-                    });
-                    hmiPages.value = uniquePageList(hmiPages.value.map(page => normalizePageName(page) === from ? name : page));
-                    currentPage.value = name;
-                }
-            } else {
-                hmiPages.value = uniquePageList([...hmiPages.value, name]);
-                currentPage.value = name;
-            }
+
+            const name = await promptDialog({
+                kicker: 'HMI Page',
+                title: 'New Page',
+                label: 'Page Name',
+                initialValue: nextPageName(),
+                confirmText: 'Create Page',
+                help: 'The new page is added to the local HMI layout.',
+                validator: (value) => validatePageName(value, 'add')
+            });
+            if (name === null) return;
+            const normalized = normalizePageName(name);
+            hmiPages.value = uniquePageList([...hmiPages.value, normalized]);
+            currentPage.value = normalized;
             selectedIndex.value = null;
-            closePageDialog();
         };
-        const deleteCurrentPage = () => {
-            if (currentPage.value === 'Main') return;
-            const page = currentPage.value;
+        const deleteCurrentPage = async () => {
+            const page = normalizePageName(currentPage.value);
+            if (!page || page === 'Main') return;
             const count = pageWidgetCount(page);
-            const message = count > 0
-                ? `Delete page "${page}" and its ${count} component${count === 1 ? '' : 's'}?`
-                : `Delete empty page "${page}"?`;
-            if (!confirm(message)) return;
+            const ok = await confirmDialog({
+                kicker: 'HMI Page',
+                title: 'Delete Page',
+                message: page,
+                detail: count > 0
+                    ? `This will remove ${count} component${count === 1 ? '' : 's'} on this page.`
+                    : 'This empty page will be removed from the local HMI layout.',
+                help: 'This only changes the local HMI layout. PLC runtime values are not changed.',
+                confirmText: 'Delete Page',
+                tone: 'danger'
+            });
+            if (!ok) return;
             widgets.value = widgets.value.filter(w => normalizePageName(w.props?.page) !== page);
             hmiPages.value = uniquePageList(hmiPages.value.filter(name => normalizePageName(name) !== page));
             currentPage.value = 'Main';
@@ -1182,8 +1189,17 @@ import { ensureTagStoreLoaded, getTagStoreNames, getTagStorePointMap } from '../
             widgets.value.splice(idx, 1);
             selectedIndex.value = null;
         };
-        const clearLayout = () => {
-            if (widgets.value.length > 0 && !confirm('Clear all HMI components and start with an empty screen?')) return;
+        const clearLayout = async () => {
+            if (widgets.value.length > 0) {
+                const ok = await confirmDialog({
+                    title: 'Clear HMI Layout',
+                    message: 'Clear all HMI components and start with an empty screen?',
+                    detail: `${widgets.value.length} component${widgets.value.length === 1 ? '' : 's'} will be removed from the local HMI layout.`,
+                    confirmText: 'Clear Layout',
+                    tone: 'danger'
+                });
+                if (!ok) return;
+            }
             stopInteraction();
             widgets.value = [];
             hmiPages.value = ['Main'];
@@ -1298,7 +1314,9 @@ import { ensureTagStoreLoaded, getTagStoreNames, getTagStorePointMap } from '../
                 hmiPages.value = uniquePageList(['Main', ...widgets.value.map(w => w.props?.page)]);
                 currentPage.value = 'Main';
                 selectedIndex.value = null;
-            } catch (err) { alert('Invalid HMI JSON'); }
+            } catch (err) {
+                await messageDialog({ title: 'Invalid HMI JSON', message: err?.message || 'The selected file could not be imported.', tone: 'danger' });
+            }
             e.target.value = '';
         };
 

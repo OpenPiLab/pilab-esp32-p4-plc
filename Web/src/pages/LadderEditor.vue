@@ -670,6 +670,7 @@ import { useLadderStore, saveLadderEditorSnapshot, restoreLadderEditorSnapshot, 
 import { listFiles, mkdir as mkdirApi, uploadFile, viewFile as viewFileApi, deletePath as deletePathApi } from '../api/fileApi';
 import { uploadScriptText, getScriptStatus } from '../api/scriptApi';
 import { usePlcStore } from '../stores/plcStore';
+import { confirmDialog, messageDialog } from '../stores/appDialog';
 
 export default {
   components:{SymbolRender},
@@ -1784,7 +1785,10 @@ export default {
       return this.loadLadderFile(this.selectedLadderFile);
     },
     async loadLadderFile(path){
-      if(this.ladderDirty && !confirm('Load this ladder file and discard unsaved changes?')) return;
+      if(this.ladderDirty) {
+        const ok = await confirmDialog({ title: 'Load Ladder File', message: 'Load this ladder file and discard unsaved changes?', confirmText: 'Load File', tone: 'warning' });
+        if(!ok) return;
+      }
       this.ladderFileBusy = true;
       try {
         const text = await viewFileApi(path);
@@ -1812,8 +1816,11 @@ export default {
         this.ladderFileBusy = false;
       }
     },
-    newLadderFile(){
-      if(this.ladderDirty && !confirm('Create a new ladder program and discard unsaved changes?')) return;
+    async newLadderFile(){
+      if(this.ladderDirty) {
+        const ok = await confirmDialog({ title: 'New Ladder Program', message: 'Create a new ladder program and discard unsaved changes?', confirmText: 'Create New', tone: 'warning' });
+        if(!ok) return;
+      }
       this.suppressLadderDirty = true;
       this.pushHistory('New ladder file');
       this.project = this.blankLadderProject();
@@ -1835,7 +1842,8 @@ export default {
       }
       const path = this.selectedLadderFile;
       if(!path) return;
-      if(!confirm('Delete ' + path + '?')) return;
+      const ok = await confirmDialog({ title: 'Delete Ladder File', message: 'Delete ' + path + '?', confirmText: 'Delete', tone: 'danger' });
+      if(!ok) return;
       this.ladderFileBusy = true;
       try {
         await deletePathApi(path);
@@ -1916,7 +1924,10 @@ export default {
     duplicateRung(i){ this.withHistory('Duplicate rung',()=>{ const copy=this.cloneRungDeep(this.project.rungs[i]); copy.comment=(copy.comment||'Rung')+' copy'; this.project.rungs.splice(i+1,0,copy); }); },
     moveRung(i,dir){ const j=i+dir; if(j<0||j>=this.project.rungs.length) return; this.withHistory('Move rung',()=>{ const [r]=this.project.rungs.splice(i,1); this.project.rungs.splice(j,0,r); }); },
     removeRung(i){ this.withHistory('Delete rung',()=>{ this.project.rungs.splice(i,1); this.selected=null; this.selectedBranch=null; if(this.editingCommentId) this.editingCommentId=null; }); },
-    clearAll(){ if(confirm('Clear all rungs?')) { this.withHistory('Clear all',()=>{ this.project.rungs=[]; this.project.rungs.push(this.createRung('')); this.editingCommentId=null; }); }},
+    async clearAll(){
+      const ok = await confirmDialog({ title: 'Clear Ladder', message: 'Clear all rungs?', detail: 'The project will be reduced to one empty rung.', confirmText: 'Clear Rungs', tone: 'danger' });
+      if(ok) { this.withHistory('Clear all',()=>{ this.project.rungs=[]; this.project.rungs.push(this.createRung('')); this.editingCommentId=null; }); }
+    },
     startEditComment(r){
       if(this.editingCommentId===r.id){ this.editingCommentId=null; return; }
       this.editingCommentId=r.id;
@@ -2061,7 +2072,7 @@ export default {
       this.history=[];
       this.editSnapshot=null;
     },
-    applyJson(){
+    async applyJson(){
       try{
         const parsed=JSON.parse(this.jsonDraft);
         this.normalizeImportedProject(parsed);
@@ -2069,7 +2080,7 @@ export default {
         this.project=parsed;
         this.selected=null; this.selectedBranch=null; this.show('JSON applied');
       }
-      catch(e){ alert('Invalid JSON: '+e.message); }
+      catch(e){ await messageDialog({ title: 'Invalid JSON', message: 'Invalid JSON: '+e.message, tone: 'danger' }); }
     },
     download(name,text,mime){
       const blob=new Blob([text],{type:mime});
@@ -2267,19 +2278,19 @@ Notes:
       const file = ev && ev.target && ev.target.files ? ev.target.files[0] : null;
       if(!file) return;
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         try {
           const files = this.parseUncompressedZipFiles(reader.result);
           const result = this.importProjectBundlePayload(files);
           this.show('Imported project bundle');
         } catch(e) {
-          alert('Could not import project bundle: '+e.message);
+          await messageDialog({ title: 'Import Failed', message: 'Could not import project bundle: '+e.message, tone: 'danger' });
         } finally {
           ev.target.value = '';
         }
       };
-      reader.onerror = () => {
-        alert('Could not read project bundle: '+(reader.error ? reader.error.message : 'unknown error'));
+      reader.onerror = async () => {
+        await messageDialog({ title: 'Read Failed', message: 'Could not read project bundle: '+(reader.error ? reader.error.message : 'unknown error'), tone: 'danger' });
         ev.target.value = '';
       };
       reader.readAsArrayBuffer(file);
@@ -2299,7 +2310,7 @@ Notes:
       const file = ev && ev.target && ev.target.files ? ev.target.files[0] : null;
       if(!file) return;
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         try {
           const parsed = JSON.parse(String(reader.result || ''));
           this.normalizeImportedProject(parsed);
@@ -2316,13 +2327,13 @@ Notes:
           nextTick(() => { this.suppressLadderDirty = false; markLadderProjectSaved(); saveLadderEditorSnapshot(this); });
           this.show('Imported '+(file.name || 'JSON project')+'; simulator reset');
         } catch(e) {
-          alert('Could not import JSON: '+e.message);
+          await messageDialog({ title: 'Import Failed', message: 'Could not import JSON: '+e.message, tone: 'danger' });
         } finally {
           ev.target.value = '';
         }
       };
-      reader.onerror = () => {
-        alert('Could not read file: '+(reader.error ? reader.error.message : 'unknown error'));
+      reader.onerror = async () => {
+        await messageDialog({ title: 'Read Failed', message: 'Could not read file: '+(reader.error ? reader.error.message : 'unknown error'), tone: 'danger' });
         ev.target.value = '';
       };
       reader.readAsText(file);
@@ -2367,12 +2378,12 @@ Notes:
         .replace(/^\.+/, '') || 'main';
       return base + '.piAS';
     },
-    sendGeneratedAngelScriptToScriptEditor(){
+    async sendGeneratedAngelScriptToScriptEditor(){
       const source = this.generatedAngelScriptSource(false);
       const name = this.generatedScriptEditorName();
       const previousSource = localStorage.getItem('pilab_script_source_v2') || '';
       if(previousSource && previousSource !== source) {
-        const ok = confirm('Send generated AngelScript to the Script page editor and replace the current Script editor contents?');
+        const ok = await confirmDialog({ title: 'Replace Script Editor Contents', message: 'Send generated AngelScript to the Script page editor and replace the current Script editor contents?', confirmText: 'Send Script', tone: 'warning' });
         if(!ok) return;
       }
       localStorage.setItem('pilab_script_source_v2', source);
@@ -2453,9 +2464,12 @@ Notes:
       if(this.ladderUploadBusy) return;
       const issues = this.validationIssues || [];
       const errorCount = issues.filter(i => i && i.level === 'error').length;
-      if(errorCount > 0 && !confirm(`This ladder project has ${errorCount} validation error${errorCount===1?'':'s'}. Upload anyway?`)) return;
+      if(errorCount > 0) {
+        const ok = await confirmDialog({ title: 'Upload With Validation Errors', message: `This ladder project has ${errorCount} validation error${errorCount===1?'':'s'}. Upload anyway?`, confirmText: 'Upload Anyway', tone: 'warning' });
+        if(!ok) return;
+      }
       if(this.tagStore && this.tagStore.dirty) {
-        const ok = confirm('The shared tag registry has unsaved changes. The PLC runtime may not expose those new tags until you save tags and upload/compile. Upload generated AngelScript anyway?');
+        const ok = await confirmDialog({ title: 'Unsaved Tag Registry', message: 'The shared tag registry has unsaved changes. The PLC runtime may not expose those new tags until you save tags and upload/compile. Upload generated AngelScript anyway?', confirmText: 'Upload Anyway', tone: 'warning' });
         if(!ok) return;
       }
       this.ladderUploadBusy = true;
@@ -2501,20 +2515,20 @@ Notes:
       const file = ev && ev.target && ev.target.files ? ev.target.files[0] : null;
       if(!file) return;
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         try {
           const parsed = JSON.parse(String(reader.result || ''));
           const count = this.importTagRegistryPayload(parsed);
           this.show('Imported '+count+' tag metadata row'+(count===1?'':'s'));
           this.$forceUpdate();
         } catch(e) {
-          alert('Could not import tag registry JSON: '+e.message);
+          await messageDialog({ title: 'Import Failed', message: 'Could not import tag registry JSON: '+e.message, tone: 'danger' });
         } finally {
           ev.target.value = '';
         }
       };
-      reader.onerror = () => {
-        alert('Could not read tag registry file: '+(reader.error ? reader.error.message : 'unknown error'));
+      reader.onerror = async () => {
+        await messageDialog({ title: 'Read Failed', message: 'Could not read tag registry file: '+(reader.error ? reader.error.message : 'unknown error'), tone: 'danger' });
         ev.target.value = '';
       };
       reader.readAsText(file);
@@ -2534,36 +2548,42 @@ Notes:
     canDeleteTagRegistryRow(t){
       return !!(t && !t.__used && t.__imported);
     },
-    deleteTagRegistryRow(name){
+    async deleteTagRegistryRow(name){
       const row = this.buildTagRegistryRows().find(t => t.name === name);
       if(!this.canDeleteTagRegistryRow(row)) {
         this.show('Only unused imported tags can be deleted here');
         return;
       }
-      if(!confirm('Delete unused imported tag "'+name+'" from the Tag Registry view?')) return;
+      const okConfirm = await confirmDialog({ title: 'Delete Imported Tag', message: 'Delete unused imported tag "'+name+'" from the Tag Registry view?', confirmText: 'Delete Tag', tone: 'danger' });
+      if(!okConfirm) return;
       const ok = this.deleteImportedTagRegistryRow(name);
       this.show(ok ? 'Deleted unused imported tag' : 'Tag was not deleted');
       this.$forceUpdate();
     },
-    deleteUnusedImportedTags(){
+    async deleteUnusedImportedTags(){
       const count = Object.values(this.tagRegistryImported || {}).filter(row => !this.tagRegistryUsedNameSet().has(row.name)).length;
       if(count < 1){ this.show('No unused imported tags to delete'); return; }
-      if(!confirm('Delete '+count+' unused imported tag'+(count===1?'':'s')+' from the Tag Registry view?')) return;
+      const okConfirm = await confirmDialog({ title: 'Delete Unused Tags', message: 'Delete '+count+' unused imported tag'+(count===1?'':'s')+' from the Tag Registry view?', confirmText: 'Delete Tags', tone: 'danger' });
+      if(!okConfirm) return;
       const removed = this.deleteUnusedImportedTagRegistryRows();
       this.show('Deleted '+removed+' unused imported tag'+(removed===1?'':'s'));
       this.$forceUpdate();
     },
-    clearImportedTagRegistry(){
+    async clearImportedTagRegistry(){
       const count = Object.keys(this.tagRegistryImported || {}).length;
       if(count < 1){ this.show('No imported tag metadata to clear'); return; }
-      if(!confirm('Clear all imported tag metadata? Tags still used by the ladder project will be auto-discovered again.')) return;
+      const okConfirm = await confirmDialog({ title: 'Clear Imported Tag Metadata', message: 'Clear all imported tag metadata?', detail: 'Tags still used by the ladder project will be auto-discovered again.', confirmText: 'Clear Metadata', tone: 'danger' });
+      if(!okConfirm) return;
       this.clearImportedTagRegistryRows();
       this.pruneUnusedTagRegistryEdits();
       this.show('Imported tag metadata cleared');
       this.$forceUpdate();
     },
-    clearTagRegistryEdits(){
-      if(Object.keys(this.tagRegistryEdits || {}).length && !confirm('Reset all edited tag metadata back to auto-discovered/imported defaults?')) return;
+    async clearTagRegistryEdits(){
+      if(Object.keys(this.tagRegistryEdits || {}).length) {
+        const okConfirm = await confirmDialog({ title: 'Reset Tag Metadata', message: 'Reset all edited tag metadata back to auto-discovered/imported defaults?', confirmText: 'Reset', tone: 'warning' });
+        if(!okConfirm) return;
+      }
       this.tagRegistryEdits = {};
       this.show('Tag metadata edits reset');
     },

@@ -174,6 +174,7 @@ import { saveTags } from '../api/tagApi';
 import { usePlcStore } from '../stores/plcStore';
 import { ensureTagStoreLoaded, ingestTagRegistryPayload, markTagStoreDirty, mergeTagRowsIntoStore, tagNameExistsInStore, useTagStore } from '../stores/tagStore';
 import { ladderTagRegistryMethods } from '../ladder/ladderTagRegistry';
+import { confirmDialog, messageDialog } from '../stores/appDialog';
 
 export default {
   name: 'TagRegistry',
@@ -330,7 +331,15 @@ export default {
       return JSON.stringify(point);
     },
     async loadFromPlc() {
-      if (this.tagStore.dirty && !confirm('Reload tags from the PLC and discard unsaved in-memory tag edits?')) return;
+      if (this.tagStore.dirty) {
+        const ok = await confirmDialog({
+          title: 'Reload Tags',
+          message: 'Reload tags from the PLC and discard unsaved in-memory tag edits?',
+          confirmText: 'Reload',
+          tone: 'warning'
+        });
+        if (!ok) return;
+      }
       this.status = 'Reloading from PLC...';
       this.cellDrafts = {};
       try {
@@ -391,7 +400,7 @@ export default {
       const file = ev?.target?.files?.[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.onload = async () => {
         try {
           const parsed = JSON.parse(String(reader.result || ''));
           this.captureSystemTagRows(parsed || { tags: [] });
@@ -401,7 +410,7 @@ export default {
           this.status = `Merged ${result.total} tag row${result.total === 1 ? '' : 's'} from JSON (${result.added} added, ${result.updated} updated, ${result.skipped} skipped)`;
         } catch (e) {
           this.status = `Import failed: ${e?.message || e}`;
-          alert(`Could not import tag registry JSON: ${e?.message || e}`);
+          await messageDialog({ title: 'Could Not Import Tags', message: `Could not import tag registry JSON: ${e?.message || e}`, tone: 'danger' });
         } finally {
           ev.target.value = '';
         }
@@ -478,13 +487,14 @@ export default {
     canDeleteTagRegistryRow(t) {
       return !!(t && !t.system && !t.__used && (t.__imported || t.__edited));
     },
-    deleteTagRegistryRow(name) {
+    async deleteTagRegistryRow(name) {
       const row = this.buildTagRegistryRows().find(t => t.name === name);
       if (!this.canDeleteTagRegistryRow(row)) {
         this.status = 'Only unused imported/manual tags can be deleted here';
         return;
       }
-      if (!confirm(`Delete unused tag "${name}" from the registry view?`)) return;
+      const ok = await confirmDialog({ title: 'Delete Tag', message: `Delete unused tag "${name}" from the registry view?`, confirmText: 'Delete Tag', tone: 'danger' });
+      if (!ok) return;
       const key = this.tagRegistryNormalizeName(name);
       if (this.tagRegistryImported && this.tagRegistryImported[key]) delete this.tagRegistryImported[key];
       if (this.tagRegistryEdits && this.tagRegistryEdits[key]) delete this.tagRegistryEdits[key];
@@ -492,25 +502,30 @@ export default {
       this.markTagsDirty(`Deleted tag ${key}`);
       this.status = 'Deleted unused tag (unsaved)';
     },
-    deleteUnusedImportedTags() {
+    async deleteUnusedImportedTags() {
       const count = Object.values(this.tagRegistryImported || {}).filter(row => !this.tagRegistryUsedNameSet().has(row.name)).length;
       if (count < 1) { this.status = 'No unused imported tags to delete'; return; }
-      if (!confirm(`Delete ${count} unused imported tag${count === 1 ? '' : 's'} from the registry view?`)) return;
+      const ok = await confirmDialog({ title: 'Delete Unused Tags', message: `Delete ${count} unused imported tag${count === 1 ? '' : 's'} from the registry view?`, confirmText: 'Delete Tags', tone: 'danger' });
+      if (!ok) return;
       const removed = this.deleteUnusedImportedTagRegistryRows();
       if (removed) this.markTagsDirty('Deleted unused imported tags');
       this.status = `Deleted ${removed} unused imported tag${removed === 1 ? '' : 's'} (unsaved)`;
     },
-    clearImportedTagRegistry() {
+    async clearImportedTagRegistry() {
       const count = Object.keys(this.tagRegistryImported || {}).length;
       if (count < 1) { this.status = 'No imported/manual tag metadata to clear'; return; }
-      if (!confirm(`Clear ${count} imported/manual tag${count === 1 ? '' : 's'} from the in-memory registry?`)) return;
+      const ok = await confirmDialog({ title: 'Clear Imported Tags', message: `Clear ${count} imported/manual tag${count === 1 ? '' : 's'} from the in-memory registry?`, confirmText: 'Clear Tags', tone: 'danger' });
+      if (!ok) return;
       this.clearImportedTagRegistryRows();
       this.pruneUnusedTagRegistryEdits();
       this.markTagsDirty('Cleared imported/manual tags');
       this.status = `Cleared ${count} imported/manual tag${count === 1 ? '' : 's'} (unsaved)`;
     },
-    clearTagRegistryEdits() {
-      if (Object.keys(this.tagRegistryEdits || {}).length && !confirm('Reset all edited tag metadata back to imported/default values?')) return;
+    async clearTagRegistryEdits() {
+      if (Object.keys(this.tagRegistryEdits || {}).length) {
+        const ok = await confirmDialog({ title: 'Reset Tag Metadata', message: 'Reset all edited tag metadata back to imported/default values?', confirmText: 'Reset', tone: 'warning' });
+        if (!ok) return;
+      }
       this.tagRegistryEdits = {};
       this.cellDrafts = {};
       this.markTagsDirty('Reset tag metadata edits');

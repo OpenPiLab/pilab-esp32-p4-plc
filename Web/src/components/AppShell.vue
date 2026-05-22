@@ -21,6 +21,7 @@
       </div>
     </header>
     <main class="app-content"><RouterView /></main>
+    <AppDialogHost />
   </div>
 </template>
 
@@ -29,6 +30,7 @@ import { onBeforeUnmount, onMounted } from 'vue';
 import { usePlcStore } from '../stores/plcStore';
 import { ensureTagStoreLoaded, useTagStore } from '../stores/tagStore';
 import UnifiedStatusBar from './UnifiedStatusBar.vue';
+import AppDialogHost from './AppDialogHost.vue';
 const plcStore = usePlcStore();
 const tagStore = useTagStore();
 function beforeUnloadTagGuard(e) {

@@ -75,6 +75,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { usePlcStore } from '../stores/plcStore';
 import { listFiles, mkdir as mkdirApi, uploadFile, viewFile as viewFileApi, deletePath as deletePathApi, filesDownloadUrl } from '../api/fileApi';
+import { confirmDialog } from '../stores/appDialog';
 
 
     const store = usePlcStore();
@@ -117,7 +118,8 @@ import { listFiles, mkdir as mkdirApi, uploadFile, viewFile as viewFileApi, dele
     async function deletePath(p){
       await refreshMode();
       if(!flashWritesAllowed.value){ status.value='Error: PLC must be STOPPED before deleting files'; return; }
-      if(!confirm('Delete ' + p + '?')) return;
+      const ok = await confirmDialog({ title: 'Delete File', message: 'Delete ' + p + '?', detail: 'This deletes the selected file or folder from the PLC filesystem.', confirmText: 'Delete', tone: 'danger' });
+      if(!ok) return;
       try { await deletePathApi(p); status.value='Deleted'; await load(); }
       catch(e){ status.value='Error: ' + (e.message||e); }
     }
