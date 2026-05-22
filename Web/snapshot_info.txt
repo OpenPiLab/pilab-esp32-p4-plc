@@ -1,15 +1,15 @@
 ﻿PiLab Snapshot Info
 ===================
-Created:       2026-05-21 09:36:38
+Created:       2026-05-21 18:39:28
 Project Root:  C:\Users\tonyf\Downloads\P4_PLC
 Script Dir:    C:\Users\tonyf\Downloads\P4_PLC\tools
 Git Found:     True
 Git Path:      C:\Program Files\Git\cmd\git.exe
 Git Repo Root: C:/Users/tonyf/Downloads/P4_PLC
 Git Branch:    main
-Git ShortHash: 1149e57
-Git FullHash:  1149e572274f630625f2f793000f7643e46e2811
-Latest Commit: 1149e57 Refactored the Ladder user interface to hide debug tools when not needed and support direct Ladder to PLC upload path.
+Git ShortHash: a675119
+Git FullHash:  a675119b05318834b3949ffc5093abfce9328697
+Latest Commit: a675119 Add board I/O Pinout to readme
 Git Warning:   
 
 Git Status --short:
