@@ -1429,13 +1429,14 @@ static esp_err_t read_small_json_body(httpd_req_t *req, char **out_body, size_t 
 
 static esp_err_t api_tags_post_handler(httpd_req_t *req)
 {
-    if (!flash_write_allowed(req)) return ESP_OK;
-
+    // Tag uploads are now RAM-only. They are allowed while the PLC is in RUN;
+    // plc_tags_load_json_ram() pauses AngelScript scanning while it merges tags
+    // in place so existing RegisterGlobalProperty() pointers remain valid.
     char *body = NULL;
     if (read_small_json_body(req, &body, 32768) != ESP_OK) return ESP_FAIL;
 
     char err[160] = {};
-    bool ok = plc_tags_load_json(body, err, sizeof(err));
+    bool ok = plc_tags_load_json_ram(body, err, sizeof(err));
     heap_caps_free(body);
 
     if (!ok) {
@@ -1445,8 +1446,33 @@ static esp_err_t api_tags_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    char json[320];
+    snprintf(json, sizeof(json),
+             "{\"ok\":true,\"message\":\"%s\",\"count\":%u,\"persistence\":\"ram_only\",\"saved\":false}",
+             err, (unsigned)plc_tags_get_count());
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static esp_err_t api_tags_save_post_handler(httpd_req_t *req)
+{
+    // Persistent flash save remains a separate explicit operation and is still
+    // blocked while PLC is RUN by flash_write_allowed().
+    if (!flash_write_allowed(req)) return ESP_OK;
+
+    char err[160] = {};
+    bool ok = plc_tags_save_to_flash(err, sizeof(err));
+
+    if (!ok) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
     char json[256];
-    snprintf(json, sizeof(json), "{\"ok\":true,\"message\":\"%s\",\"count\":%u}", err, (unsigned)plc_tags_get_count());
+    snprintf(json, sizeof(json), "{\"ok\":true,\"message\":\"%s\",\"saved\":true}", err);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
@@ -2554,6 +2580,14 @@ httpd_uri_t large_status_uri = {
         .user_ctx = NULL
     };
     register_uri_checked(g_http_server, &api_tags_post_uri);
+
+    httpd_uri_t api_tags_save_post_uri = {
+        .uri = "/api/tags/save",
+        .method = HTTP_POST,
+        .handler = api_tags_save_post_handler,
+        .user_ctx = NULL
+    };
+    register_uri_checked(g_http_server, &api_tags_save_post_uri);
 
     httpd_uri_t plc_write_uri = {
         .uri = "/api/plc_write",

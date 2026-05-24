@@ -7,6 +7,8 @@ sdkconfig.old
 Support/
 Private/
 Scratch/
+tools/firmware_tests/build/
+
 
 # CMake generated files
 CMakeFiles/
@@ -47,6 +49,16 @@ Thumbs.db
 # Keep official project tools tracked.
 !tools/
 !tools/*.ps1
+
+# Firmware host-test artifacts
+metadata_builder_host_test.exe
+metadata_builder_host_test.obj
+pilab_script_builder.obj
+test_builder
+test_builder.exe
+test_builder.obj
+test_builder.cpp
+tools/firmware_tests/build/
 
 # Logs
 *.log

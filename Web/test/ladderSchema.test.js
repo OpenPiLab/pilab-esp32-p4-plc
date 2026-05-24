@@ -144,3 +144,72 @@ describe('ladder project shape validation', () => {
     expect(() => assertValidLadderProjectShape(project)).toThrow(/Invalid PiLab ladder project JSON/);
   });
 });
+
+describe('ladder schema metadata parameter validation', () => {
+  it('documents metadata block params in the formal JSON schema', () => {
+    const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
+    expect(schema.$defs.blockParam.properties.enabled.type).toBe('boolean');
+    expect(schema.$defs.blockParam.properties.tag.$ref).toBe('#/$defs/identifier');
+    expect(schema.$defs.blockParam.properties.min.type).toBe('number');
+    expect(schema.$defs.blockParam.properties.max.type).toBe('number');
+    expect(schema.$defs.symbol.properties.param.$ref).toBe('#/$defs/blockParam');
+    expect(schema.$defs.symbol.examples.some((item) => item.param && item.param.tag === 'T_StartDelay_PT')).toBe(true);
+  });
+
+  it('accepts metadata params on TON and CTU function blocks', () => {
+    const project = validProject();
+    project.rungs[0].main[3].param = {
+      enabled: true,
+      tag: 'T_Delay_PT',
+      min: 0,
+      max: 600000,
+      units: 'ms',
+    };
+    project.rungs[1].main[1].param = {
+      enabled: true,
+      tag: 'C_Parts_PV',
+      min: 0,
+      max: 999999,
+      units: 'count',
+    };
+
+    expect(validateLadderProjectShape(project)).toEqual([]);
+  });
+
+  it('rejects malformed metadata params', () => {
+    const project = validProject();
+    project.rungs[0].main[3].param = {
+      enabled: 'yes',
+      tag: 'Bad Tag',
+      min: 100,
+      max: 10,
+      units: 123,
+    };
+
+    const issues = validateLadderProjectShape(project);
+    const paths = issues.map((item) => item.path);
+    expect(paths).toContain('rungs[0].main[3].param.enabled');
+    expect(paths).toContain('rungs[0].main[3].param.tag');
+    expect(paths).toContain('rungs[0].main[3].param.units');
+    expect(issues.some((item) => item.path === 'rungs[0].main[3].param' && item.message.includes('param.max'))).toBe(true);
+  });
+
+  it('requires a valid param tag when metadata param exposure is enabled', () => {
+    const project = validProject();
+    project.rungs[0].main[3].param = { enabled: true, min: 0, max: 600000 };
+
+    const issues = validateLadderProjectShape(project);
+    expect(issues.some((item) => item.path === 'rungs[0].main[3].param.tag')).toBe(true);
+  });
+
+  it('rejects metadata params on non-function-block symbols but still accepts legacy blocks without params', () => {
+    const legacy = validProject();
+    expect(validateLadderProjectShape(legacy)).toEqual([]);
+
+    const project = validProject();
+    project.rungs[0].main[0].param = { enabled: true, tag: 'I0_Start_PT', min: 0, max: 1 };
+
+    const issues = validateLadderProjectShape(project);
+    expect(issues.some((item) => item.path === 'rungs[0].main[0].param' && item.message.includes('only valid'))).toBe(true);
+  });
+});

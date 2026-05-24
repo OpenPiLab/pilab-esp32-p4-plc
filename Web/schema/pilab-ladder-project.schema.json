@@ -131,6 +131,10 @@
         "loadExpr": {
           "$ref": "#/$defs/booleanExpression",
           "description": "Accepted legacy/alias CTD load expression. Prefer resetTag in new files."
+        },
+        "param": {
+          "$ref": "#/$defs/blockParam",
+          "description": "Optional metadata-aware block parameter. Valid for TON/TOF PT and CTU/CTD PV."
         }
       },
       "allOf": [
@@ -175,6 +179,33 @@
           "tag": "C_Parts",
           "preset": 3,
           "resetTag": "ResetPB || !AutoMode"
+        },
+        {
+          "id": "ton_delay_hmi",
+          "type": "TON",
+          "tag": "T_StartDelay",
+          "preset": 500,
+          "param": {
+            "enabled": true,
+            "tag": "T_StartDelay_PT",
+            "min": 0,
+            "max": 600000,
+            "units": "ms"
+          }
+        },
+        {
+          "id": "ctu_parts_hmi",
+          "type": "CTU",
+          "tag": "C_Parts",
+          "preset": 3,
+          "resetTag": "ResetPB",
+          "param": {
+            "enabled": true,
+            "tag": "C_Parts_PV",
+            "min": 0,
+            "max": 999999,
+            "units": "count"
+          }
         }
       ]
     },
@@ -811,6 +842,56 @@
         },
         {
           "$ref": "#/$defs/scriptRung"
+        }
+      ]
+    },
+    "blockParam": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Optional metadata-aware writable parameter for TON/TOF PT or CTU/CTD PV. Used by AngelScript PiLabParam generation and HMI/live PLC bindings; ignored by the sandboxed JavaScript simulator.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "When true, the ladder transpiler emits PiLabParam metadata and applies the generated parameter tag to the block."
+        },
+        "tag": {
+          "$ref": "#/$defs/identifier",
+          "description": "Writable PLC tag created for this parameter, for example T1_PT or C1_PV."
+        },
+        "min": {
+          "type": "number",
+          "description": "Minimum value accepted by the generated parameter tag."
+        },
+        "max": {
+          "type": "number",
+          "description": "Maximum value accepted by the generated parameter tag."
+        },
+        "default": {
+          "type": "number",
+          "description": "Optional explicit default value. If omitted, the symbol preset is used."
+        },
+        "units": {
+          "type": "string",
+          "description": "Optional display units, for example ms or count."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "required": [
+              "tag"
+            ]
+          }
         }
       ]
     }

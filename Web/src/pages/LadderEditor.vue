@@ -502,6 +502,32 @@
               <label v-if="hasPreset(selected.el)" class="text-xs text-slate-400">Preset</label>
               <input v-if="hasPreset(selected.el)" v-model.number="selected.el.preset" type="number" class="w-full min-w-0 px-2 py-1 rounded bg-slate-950 border border-slate-700 mono text-sm outline-none focus:border-cyan-400"/>
 
+              <template v-if="hasPreset(selected.el)">
+                <label class="text-xs text-slate-400">HMI Param</label>
+                <label class="flex items-center gap-2 text-xs text-slate-300 px-2 py-1 rounded bg-slate-950 border border-slate-700">
+                  <input type="checkbox" :checked="!!(selected.el.param && selected.el.param.enabled)" @change="setBlockParamEnabled(selected.el, $event.target.checked)"/>
+                  <span>Expose {{blockParamName(selected.el)}} as writable tag</span>
+                </label>
+
+                <label v-if="selected.el.param && selected.el.param.enabled" class="text-xs text-slate-400">Param Tag</label>
+                <input v-if="selected.el.param && selected.el.param.enabled"
+                  v-model="selected.el.param.tag"
+                  @focus="captureEditSnapshot"
+                  @change="commitEditSnapshot('Block parameter tag changed')"
+                  class="w-full min-w-0 px-2 py-1 rounded bg-slate-950 border border-slate-700 mono text-sm outline-none focus:border-cyan-400"/>
+
+                <label v-if="selected.el.param && selected.el.param.enabled" class="text-xs text-slate-400">Param Min/Max</label>
+                <div v-if="selected.el.param && selected.el.param.enabled" class="grid grid-cols-2 gap-2">
+                  <input v-model.number="selected.el.param.min" type="number" placeholder="min" class="w-full min-w-0 px-2 py-1 rounded bg-slate-950 border border-slate-700 mono text-sm outline-none focus:border-cyan-400"/>
+                  <input v-model.number="selected.el.param.max" type="number" placeholder="max" class="w-full min-w-0 px-2 py-1 rounded bg-slate-950 border border-slate-700 mono text-sm outline-none focus:border-cyan-400"/>
+                </div>
+
+                <div v-if="selected.el.param && selected.el.param.enabled" class="col-span-2 text-[11px] text-slate-500 leading-relaxed">
+                  Generates <span class="mono text-cyan-200">[PiLabParam name=&quot;{{blockParamName(selected.el)}}&quot; tag=&quot;{{blockParamTag(selected.el)}}&quot; ...]</span>
+                  and monitor tags such as <span class="mono text-cyan-200">__obj_{{sanitize(selected.el.tag)}}_Q</span>.
+                </div>
+              </template>
+
               <label v-if="isCounter(selected.el)" class="text-xs text-slate-400">{{selected.el.type==='CTD' ? 'Load Expr' : 'Reset Expr'}}</label>
               <input v-if="isCounter(selected.el)"
                 v-model="selected.el.resetTag"
@@ -929,6 +955,24 @@ export default {
       this.showCodeTabs = !this.showCodeTabs;
       if(!this.showCodeTabs && ['json','angelscript','javascript'].includes(this.activeView)) this.activeView = 'ladder';
       nextTick(() => this.refreshPrismOutputEditors());
+    },
+
+    ensureBlockParam(el){
+      if(!el || !this.hasPreset(el)) return null;
+      const name = this.blockParamName(el);
+      const defaultMax = (el.type === 'TON' || el.type === 'TOF') ? 600000 : 999999;
+      if(!el.param || typeof el.param !== 'object') el.param = {};
+      if(!el.param.tag) el.param.tag = `${this.sanitize(el.tag)}_${name}`;
+      if(!Number.isFinite(Number(el.param.min))) el.param.min = 0;
+      if(!Number.isFinite(Number(el.param.max))) el.param.max = defaultMax;
+      return el.param;
+    },
+    setBlockParamEnabled(el, enabled){
+      if(!el || !this.hasPreset(el)) return;
+      this.captureEditSnapshot();
+      const p = this.ensureBlockParam(el);
+      p.enabled = !!enabled;
+      this.commitEditSnapshot(enabled ? 'Block parameter exposed' : 'Block parameter hidden');
     },
     isEditableKeyboardTarget(target){
       if(!target) return false;

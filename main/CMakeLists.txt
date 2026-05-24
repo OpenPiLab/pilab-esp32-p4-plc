@@ -58,6 +58,7 @@ idf_component_register(
         "ethernet_web.c"
         "udp_server.c"
         "script_engine.cpp"
+        "pilab_script_builder.cpp"
         "plc_tags.cpp"
         "plc_filesystem.cpp"
     INCLUDE_DIRS "."
@@ -81,4 +82,10 @@ idf_component_register(
 
 if(NOT CMAKE_SCRIPT_MODE_FILE)
     add_dependencies(${COMPONENT_LIB} pilab_web_gzip_assets)
+endif()
+
+if(NOT CMAKE_SCRIPT_MODE_FILE)
+    # Enable temporary PiLab ScriptBuilder metadata logging while the feature is being brought up.
+    # Set to 0 later to compile the debug output out.
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE PILAB_SCRIPT_BUILDER_DEBUG=1)
 endif()

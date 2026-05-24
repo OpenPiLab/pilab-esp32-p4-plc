@@ -29,6 +29,7 @@
 #include "plc_io.hpp"
 #include "plc_tags.hpp"
 #include "perf_test.hpp"
+#include "pilab_script_builder.hpp"
 
 static const char* TAG = "AS_ENGINE";
 
@@ -289,6 +290,7 @@ static uint32_t g_run_scan_window_over_5000 = 0;
 // output image, but the interpreted Scan() function is not executed until the
 // compile either fails or the newly compiled program is activated.
 static std::atomic<bool> g_pause_script_for_compile{false};
+static std::atomic<bool> g_pause_script_for_runtime_update{false};
 static std::atomic<uint32_t> g_paused_scan_skips{0};
 static std::atomic<uint32_t> g_total_pause_windows{0};
 static std::atomic<uint64_t> g_last_pause_us{0};
@@ -484,6 +486,53 @@ public:
         if (!register_uint_global(engine, "PLC_ScanActualPeriodUs", &g_script_actual_period_us, errors)) return false;
         if (!register_uint_global(engine, "PLC_ScanBudgetUs", &g_script_budget_us, errors)) return false;
 
+        PiLabScriptBuilder pilab_builder;
+        std::string builder_error;
+        if (!pilab_builder.preprocess(text, len, builder_error)) {
+            append_error(errors, builder_error.c_str());
+            append_error(errors, "\n");
+            return false;
+        }
+        pilab_builder.debugPrintMetadata();
+        pilab_builder.debugPrintParams();
+        pilab_builder.debugPrintMonitors();
+
+        // PiLabParam metadata creates writable parameter tags before the script is
+        // compiled so ladder-generated code can reference them as AngelScript globals.
+        for (const auto& param : pilab_builder.params()) {
+            char desc[PLC_TAG_DESC_MAX];
+            snprintf(desc, sizeof(desc), "Parameter: %s", param.tagName.c_str());
+            char param_err[128] = {};
+            if (!plc_tags_ensure_param_tag(param.tagName.c_str(),
+                                           param.tagType.c_str(),
+                                           param.defaultValue.c_str(),
+                                           param.minValue,
+                                           param.maxValue,
+                                           param.units.c_str(),
+                                           desc,
+                                           param_err,
+                                           sizeof(param_err))) {
+                append_error(errors, param_err[0] ? param_err : "Create parameter tag failed");
+                append_error(errors, "\n");
+                return false;
+            }
+        }
+
+        // PiLabMonitor metadata creates hidden monitor tags before the script is
+        // compiled so they can be registered as normal AngelScript globals.
+        for (const auto& mon : pilab_builder.monitors()) {
+            for (const auto& field : mon.fields) {
+                char desc[PLC_TAG_DESC_MAX];
+                snprintf(desc, sizeof(desc), "Monitor: %s.%s", mon.objectName.c_str(), field.name.c_str());
+                char mon_err[128] = {};
+                if (!plc_tags_ensure_monitor_tag(field.tagName.c_str(), field.tagType.c_str(), desc, mon_err, sizeof(mon_err))) {
+                    append_error(errors, mon_err[0] ? mon_err : "Create monitor tag failed");
+                    append_error(errors, "\n");
+                    return false;
+                }
+            }
+        }
+
         char tag_err[256] = {};
         if (!plc_tags_register_angelscript_globals(engine, tag_err, sizeof(tag_err))) {
             append_error(errors, tag_err[0] ? tag_err : "Register PLC tags failed\n");
@@ -491,10 +540,17 @@ public:
             return false;
         }
 
+        if (!pilab_builder.buildFinalScript(builder_error)) {
+            append_error(errors, builder_error.c_str());
+            append_error(errors, "\n");
+            return false;
+        }
+        const std::string& clean_script = pilab_builder.finalScript();
+
         asIScriptModule* mod = engine->GetModule("control", asGM_ALWAYS_CREATE);
         if (!mod) return fail(errors, "GetModule failed\n");
 
-        r = mod->AddScriptSection("uploaded_script", text, len);
+        r = mod->AddScriptSection("uploaded_script", clean_script.c_str(), clean_script.size());
         if (r < 0) return fail(errors, "AddScriptSection failed\n");
 
         r = mod->Build();
@@ -787,6 +843,30 @@ static void script_compile_task(void*)
     }
 }
 
+void script_engine_pause_for_runtime_update(const char* reason)
+{
+    g_pause_script_for_runtime_update.store(true);
+    // Give the 5 ms script task a chance to observe the pause before the caller
+    // mutates tag values/metadata that may be registered as AngelScript globals.
+    // Existing tag storage is still updated in place, so this is a consistency
+    // guard, not a pointer-lifetime workaround.
+    vTaskDelay(pdMS_TO_TICKS(10));
+    if (reason && reason[0]) {
+        ESP_LOGI(TAG, "Script scan paused for runtime update: %s", reason);
+    }
+}
+
+void script_engine_resume_after_runtime_update(void)
+{
+    g_pause_script_for_runtime_update.store(false);
+    ESP_LOGI(TAG, "Script scan resumed after runtime update");
+}
+
+bool script_engine_is_runtime_update_paused(void)
+{
+    return g_pause_script_for_runtime_update.load();
+}
+
 bool script_engine_start(void)
 {
     if (!g_program_mutex) g_program_mutex = xSemaphoreCreateMutex();
@@ -1015,7 +1095,7 @@ bool script_engine_run_scan(void)
     // firmware-side 1 ms I/O task continues to read inputs and apply the last
     // published outputs. This experiment lets us see how much jitter is caused
     // by compiler-vs-interpreter contention.
-    const bool paused = g_pause_script_for_compile.load();
+    const bool paused = g_pause_script_for_compile.load() || g_pause_script_for_runtime_update.load();
 
     if (!paused) {
         sync_inputs_to_script_globals();

@@ -60,10 +60,45 @@ export const ladderTagRegistryMethods = {
     return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : '';
   },
 
+
+  tagRegistryBlockParamName(e){
+    if(!e) return '';
+    if(e.type === 'TON' || e.type === 'TOF') return 'PT';
+    if(e.type === 'CTU' || e.type === 'CTD') return 'PV';
+    return '';
+  },
+
+  tagRegistryBlockParamTag(e){
+    if(!e) return '';
+    const explicit = e.param && e.param.tag;
+    const name = this.tagRegistryBlockParamName(e);
+    return this.tagRegistryNormalizeName(explicit || (name ? `${this.sanitize ? this.sanitize(e.tag) : e.tag}_${name}` : ''));
+  },
+
+  tagRegistryBlockMonitorFields(e){
+    if(!e) return [];
+    if(e.type === 'TON' || e.type === 'TOF') return [
+      { name:'Q', type:'bool', units:'' },
+      { name:'ET', type:'int', units:'ms' },
+      { name:'PT', type:'int', units:'ms' }
+    ];
+    if(e.type === 'CTU' || e.type === 'CTD') return [
+      { name:'Q', type:'bool', units:'' },
+      { name:'CV', type:'int', units:'count' },
+      { name:'PV', type:'int', units:'count' }
+    ];
+    return [];
+  },
+
+  tagRegistryBlockMonitorTag(e, field){
+    const base = this.sanitize ? this.sanitize(e && e.tag) : String((e && e.tag) || '');
+    return this.tagRegistryNormalizeName(`__obj_${base}_${field}`);
+  },
+
   tagRegistryAddUsage(map, rawName, usage = {}){
     const name = this.tagRegistryNormalizeName(rawName);
     if(!name || this.tagRegistryIsReservedOrSystem(name)) return;
-    if(!map.has(name)) map.set(name, { name, reads:0, writes:0, hmi:false, memory:false, output:false, numeric:false, sources:new Set(), contexts:new Set(), xrefs:[] });
+    if(!map.has(name)) map.set(name, { name, reads:0, writes:0, hmi:false, memory:false, output:false, numeric:false, type:null, value:null, units:'', min:null, max:null, writable:null, retentive:null, hmi_visible:null, script_visible:null, description:'', sources:new Set(), contexts:new Set(), xrefs:[] });
     const item = map.get(name);
     if(usage.read) item.reads++;
     if(usage.write) item.writes++;
@@ -71,6 +106,16 @@ export const ladderTagRegistryMethods = {
     if(usage.memory || /^M_/i.test(name)) item.memory = true;
     if(usage.output) item.output = true;
     if(usage.numeric) item.numeric = true;
+    if(usage.type) item.type = usage.type;
+    if(usage.value !== undefined) item.value = usage.value;
+    if(usage.units !== undefined) item.units = String(usage.units || '');
+    if(usage.min !== undefined && Number.isFinite(Number(usage.min))) item.min = Number(usage.min);
+    if(usage.max !== undefined && Number.isFinite(Number(usage.max))) item.max = Number(usage.max);
+    if(usage.writable !== undefined) item.writable = !!usage.writable;
+    if(usage.retentive !== undefined) item.retentive = !!usage.retentive;
+    if(usage.hmi_visible !== undefined) item.hmi_visible = !!usage.hmi_visible;
+    if(usage.script_visible !== undefined) item.script_visible = !!usage.script_visible;
+    if(usage.description) item.description = String(usage.description);
     if(usage.source) item.sources.add(usage.source);
     if(usage.context) item.contexts.add(usage.context);
     if(usage.source){
@@ -160,6 +205,27 @@ export const ladderTagRegistryMethods = {
       const visitElement = (e, source) => {
         if(!e) return;
         if(['TON','TOF','CTU','CTD','ONS'].includes(e.type)){
+          if(['TON','TOF','CTU','CTD'].includes(e.type)){
+            const block = this.sanitize ? this.sanitize(e.tag) : String(e.tag || '');
+            const paramName = this.tagRegistryBlockParamName(e);
+            if(e.param && e.param.enabled && paramName){
+              const ptag = this.tagRegistryBlockParamTag(e);
+              add(ptag, {
+                read:true, write:true, hmi:true, numeric:true, type:'int', value:Number(e.preset || ((e.type === 'TON' || e.type === 'TOF') ? 1000 : 10)), units:(e.type === 'TON' || e.type === 'TOF') ? 'ms' : 'count',
+                min:e.param.min, max:e.param.max, writable:true, retentive:true, hmi_visible:true, script_visible:true,
+                source, context:'PiLabParam',
+                description:`Writable ${paramName} parameter for ${e.type} block ${block}.`
+              });
+            }
+            for(const f of this.tagRegistryBlockMonitorFields(e)){
+              const mtag = this.tagRegistryBlockMonitorTag(e, f.name);
+              add(mtag, {
+                read:true, hmi:true, numeric:f.type !== 'bool', type:f.type, units:f.units, writable:false, retentive:false, hmi_visible:true, script_visible:true,
+                source, context:'PiLabMonitor',
+                description:`Read-only ${f.name} monitor for ${e.type} block ${block}.`
+              });
+            }
+          }
           if((e.type === 'CTU' || e.type === 'CTD') && (e.resetTag || e.resetExpr || e.loadTag || e.loadExpr)){
             for(const t of this.tagRegistryExpressionTags(e.resetTag || e.resetExpr || e.loadTag || e.loadExpr)) add(t, { read:true, source, context:'counter-control' });
           }
@@ -202,25 +268,25 @@ export const ladderTagRegistryMethods = {
   },
 
   defaultTagRegistryRow(entry){
-    const type = normalizeRegistryType(this.inferTagRegistryType(entry));
+    const type = normalizeRegistryType(entry.type || this.inferTagRegistryType(entry));
     const mm = minMaxForType(type);
     const isHmi = /^HMI_/i.test(entry.name) || entry.hmi;
     const isMemory = /^M_/i.test(entry.name) || entry.memory;
     return {
       name: entry.name,
       type,
-      value: defaultValueForType(type),
-      units: '',
-      min: mm.min,
-      max: mm.max,
-      writable: isHmi || (!isMemory && !entry.output),
-      retentive: isMemory,
+      value: entry.value !== null && entry.value !== undefined ? coerceRegistryValue(type, entry.value) : defaultValueForType(type),
+      units: entry.units || '',
+      min: entry.min !== null && entry.min !== undefined ? entry.min : mm.min,
+      max: entry.max !== null && entry.max !== undefined ? entry.max : mm.max,
+      writable: entry.writable !== null && entry.writable !== undefined ? entry.writable : (isHmi || (!isMemory && !entry.output)),
+      retentive: entry.retentive !== null && entry.retentive !== undefined ? entry.retentive : isMemory,
       // PiLab treats user tags as visible to both HMI and script by default.
       // The old per-tag HMI/script visibility flags are kept in the JSON for
       // compatibility, but the UI no longer exposes them.
       hmi_visible: true,
       script_visible: true,
-      description: this.inferTagRegistryDescription(entry)
+      description: entry.description || this.inferTagRegistryDescription(entry)
     };
   },
 

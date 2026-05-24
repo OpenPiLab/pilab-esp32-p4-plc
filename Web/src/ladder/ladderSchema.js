@@ -27,6 +27,51 @@ function issue(level, path, message) {
   return { level, path, message };
 }
 
+
+function validateParamShape(param, symbol, path) {
+  const issues = [];
+
+  if (param === undefined) return issues;
+  if (!isPlainObject(param)) {
+    issues.push(issue('error', path, 'param must be an object when present.'));
+    return issues;
+  }
+
+  if (!LADDER_FUNCTION_BLOCK_TYPES.includes(symbol.type)) {
+    issues.push(issue('error', path, 'param is only valid on TON, TOF, CTU, and CTD symbols.'));
+  }
+
+  if (param.enabled !== undefined && typeof param.enabled !== 'boolean') {
+    issues.push(issue('error', pathJoin(path, 'enabled'), 'param.enabled must be a boolean when present.'));
+  }
+
+  if (param.tag !== undefined) {
+    if (typeof param.tag !== 'string' || !param.tag.trim()) {
+      issues.push(issue('error', pathJoin(path, 'tag'), 'param.tag must be a non-empty string when present.'));
+    } else if (!isValidTagIdentifier(param.tag)) {
+      issues.push(issue('error', pathJoin(path, 'tag'), 'param.tag must be a valid AngelScript identifier.'));
+    }
+  } else if (param.enabled === true) {
+    issues.push(issue('error', pathJoin(path, 'tag'), 'param.tag is required when param.enabled is true.'));
+  }
+
+  for (const key of ['min', 'max', 'default']) {
+    if (param[key] !== undefined && !Number.isFinite(Number(param[key]))) {
+      issues.push(issue('error', pathJoin(path, key), `param.${key} must be numeric when present.`));
+    }
+  }
+
+  if (Number.isFinite(Number(param.min)) && Number.isFinite(Number(param.max)) && Number(param.max) < Number(param.min)) {
+    issues.push(issue('error', path, 'param.max must be greater than or equal to param.min.'));
+  }
+
+  if (param.units !== undefined && typeof param.units !== 'string') {
+    issues.push(issue('error', pathJoin(path, 'units'), 'param.units must be a string when present.'));
+  }
+
+  return issues;
+}
+
 function validateSymbolShape(symbol, path) {
   const issues = [];
 
@@ -59,6 +104,8 @@ function validateSymbolShape(symbol, path) {
   if (symbol.resetTag !== undefined && typeof symbol.resetTag !== 'string') {
     issues.push(issue('error', pathJoin(path, 'resetTag'), 'resetTag must be a string when present.'));
   }
+
+  issues.push(...validateParamShape(symbol.param, symbol, pathJoin(path, 'param')));
 
   return issues;
 }

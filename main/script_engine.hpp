@@ -49,6 +49,15 @@ uint32_t script_engine_get_generation(void);
 const char* script_engine_get_last_error(void);
 ScriptCompileState script_engine_get_state(void);
 
+
+// Temporarily pause user script execution while another firmware subsystem
+// performs an in-place runtime update that touches registered tag storage.
+// This does not destroy or replace the active script; it simply causes
+// script_engine_run_scan() to skip user scan execution until resumed.
+void script_engine_pause_for_runtime_update(const char* reason);
+void script_engine_resume_after_runtime_update(void);
+bool script_engine_is_runtime_update_paused(void);
+
 // Runtime script metadata. Names are filenames from /scripts when available.
 void script_engine_get_active_script_name(char* out, size_t out_len);
 void script_engine_get_pending_script_name(char* out, size_t out_len);

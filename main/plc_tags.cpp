@@ -1,6 +1,7 @@
 #include "plc_tags.hpp"
 #include "plc_io.hpp"
 #include "plc_filesystem.hpp"
+#include "script_engine.hpp"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -123,9 +124,14 @@ static bool is_plc_runtime_system_tag_name(const char* name)
     return name && strncmp(name, "PLC_", 4) == 0;
 }
 
+static bool is_pilab_monitor_tag_name(const char* name)
+{
+    return name && strncmp(name, "__obj_", 6) == 0;
+}
+
 static bool is_system_tag_name(const char* name)
 {
-    return is_exact_runtime_io_name(name) || is_plc_runtime_system_tag_name(name);
+    return is_exact_runtime_io_name(name) || is_plc_runtime_system_tag_name(name) || is_pilab_monitor_tag_name(name);
 }
 
 static bool is_direct_script_runtime_global(const char* name)
@@ -602,6 +608,39 @@ static float find_float_field(const char* obj, const char* key, float def)
     return strtof(p, nullptr);
 }
 
+static void update_existing_tag_from_upload_nolock(RuntimeTag& dst, const RuntimeTag& src)
+{
+    // IMPORTANT: Do not replace, delete, or reorder RuntimeTag storage while a
+    // compiled AngelScript module may still have RegisterGlobalProperty()
+    // pointers into dst.value. Only update fields in place.
+    dst.writable = src.writable;
+    dst.retentive = src.retentive;
+    dst.hmi_visible = src.hmi_visible;
+    dst.script_visible = src.script_visible;
+    snprintf(dst.description, sizeof(dst.description), "%.*s", (int)(PLC_TAG_DESC_MAX - 1), src.description);
+    snprintf(dst.units, sizeof(dst.units), "%.*s", (int)(sizeof(dst.units) - 1), src.units);
+    dst.min_value = src.min_value;
+    dst.max_value = src.max_value;
+
+    // A full tag upload is allowed to update the current value too. The active
+    // script is paused by plc_tags_load_json_internal() while this happens.
+    if (dst.type == PLC_TAG_BOOL) dst.value.b = src.value.b;
+    else if (dst.type == PLC_TAG_INT) dst.value.i = src.value.i;
+    else dst.value.f = src.value.f;
+}
+
+static bool append_uploaded_tag_nolock(const RuntimeTag& src, char* err, size_t err_len)
+{
+    if (g_tag_count >= PLC_TAG_MAX_COUNT) {
+        set_err(err, err_len, "Tag table full");
+        return false;
+    }
+    RuntimeTag& dst = g_tags[g_tag_count++];
+    memset(&dst, 0, sizeof(dst));
+    dst = src;
+    return true;
+}
+
 static bool plc_tags_load_json_internal(const char* json, bool save_file, char* err, size_t err_len)
 {
     if (!json) { set_err(err, err_len, "No JSON body"); return false; }
@@ -610,12 +649,12 @@ static bool plc_tags_load_json_internal(const char* json, bool save_file, char* 
     // This function is called from the ESP-IDF httpd task. Do not put the
     // whole candidate tag table on that task's stack; it is large enough to
     // trip the stack protector on ESP32-P4 when /api/tags is posted.
-    RuntimeTag* new_tags = (RuntimeTag*)calloc(PLC_TAG_MAX_COUNT, sizeof(RuntimeTag));
-    if (!new_tags) {
+    RuntimeTag* uploaded_tags = (RuntimeTag*)calloc(PLC_TAG_MAX_COUNT, sizeof(RuntimeTag));
+    if (!uploaded_tags) {
         set_err(err, err_len, "Out of memory allocating tag table");
         return false;
     }
-    size_t new_count = 0;
+    size_t uploaded_count = 0;
 
     const char* p = json;
     while ((p = strchr(p, '{')) != nullptr) {
@@ -640,7 +679,7 @@ static bool plc_tags_load_json_internal(const char* json, bool save_file, char* 
             char msg[256];
             snprintf(msg, sizeof(msg), "Invalid tag '%s': %s", name, name_err);
             set_err(err, err_len, msg);
-            free(new_tags);
+            free(uploaded_tags);
             return false;
         }
         PlcTagType type;
@@ -648,25 +687,26 @@ static bool plc_tags_load_json_internal(const char* json, bool save_file, char* 
             char msg[192];
             snprintf(msg, sizeof(msg), "Invalid type '%s' for tag '%s'. Expected bool, int, or float", type_s, name);
             set_err(err, err_len, msg);
-            free(new_tags);
+            free(uploaded_tags);
             return false;
         }
-        if (new_count >= PLC_TAG_MAX_COUNT) {
-            set_err(err, err_len, "Too many tags");
-            free(new_tags);
+        if (uploaded_count >= PLC_TAG_MAX_COUNT) {
+            set_err(err, err_len, "Too many tags in uploaded registry");
+            free(uploaded_tags);
             return false;
         }
-        for (size_t i = 0; i < new_count; ++i) {
-            if (strcmp(new_tags[i].name, name) == 0) {
+        for (size_t i = 0; i < uploaded_count; ++i) {
+            if (strcmp(uploaded_tags[i].name, name) == 0) {
                 char msg[192];
                 snprintf(msg, sizeof(msg), "Duplicate tag name '%s' in submitted tag registry", name);
                 set_err(err, err_len, msg);
-                free(new_tags);
+                free(uploaded_tags);
                 return false;
             }
         }
 
-        RuntimeTag& t = new_tags[new_count++];
+        RuntimeTag& t = uploaded_tags[uploaded_count++];
+        memset(&t, 0, sizeof(t));
         snprintf(t.name, sizeof(t.name), "%s", name);
         t.type = type;
         t.writable = find_bool_field(obj, "writable", true);
@@ -682,13 +722,66 @@ static bool plc_tags_load_json_internal(const char* json, bool save_file, char* 
         else t.value.f = find_float_field(obj, "value", 0.0f);
     }
 
+    // First validate against the live table without mutating it. A live tag's
+    // type cannot be changed because AngelScript may already have a global
+    // property registered to the address and C++ type of its value storage.
     xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
-    memcpy(g_tags, new_tags, PLC_TAG_MAX_COUNT * sizeof(RuntimeTag));
-    g_tag_count = new_count;
+    size_t additions = 0;
+    for (size_t i = 0; i < uploaded_count; ++i) {
+        int idx = find_tag_index_nolock(uploaded_tags[i].name);
+        if (idx >= 0) {
+            if (g_tags[idx].type != uploaded_tags[i].type) {
+                char msg[224];
+                snprintf(msg, sizeof(msg),
+                         "Cannot change type of live tag '%s' from %s to %s; create a new tag name instead",
+                         uploaded_tags[i].name, type_to_string(g_tags[idx].type), type_to_string(uploaded_tags[i].type));
+                xSemaphoreGive(g_tags_mutex);
+                set_err(err, err_len, msg);
+                free(uploaded_tags);
+                return false;
+            }
+        } else {
+            additions++;
+        }
+    }
+    if (g_tag_count + additions > PLC_TAG_MAX_COUNT) {
+        xSemaphoreGive(g_tags_mutex);
+        set_err(err, err_len, "Tag table full; upload would exceed maximum live tag count");
+        free(uploaded_tags);
+        return false;
+    }
+    xSemaphoreGive(g_tags_mutex);
+
+    // Pause the script scan while mutating live tag values/metadata. Existing
+    // RuntimeTag storage is updated in place, so registered AngelScript pointers
+    // remain valid; the pause avoids reading half-updated values/flags.
+    if (g_loaded) script_engine_pause_for_runtime_update("tag registry upload");
+
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    for (size_t i = 0; i < uploaded_count; ++i) {
+        int idx = find_tag_index_nolock(uploaded_tags[i].name);
+        if (idx >= 0) {
+            update_existing_tag_from_upload_nolock(g_tags[idx], uploaded_tags[i]);
+        } else {
+            if (!append_uploaded_tag_nolock(uploaded_tags[i], err, err_len)) {
+                xSemaphoreGive(g_tags_mutex);
+                if (g_loaded) script_engine_resume_after_runtime_update();
+                free(uploaded_tags);
+                return false;
+            }
+        }
+    }
+
+    // Never delete tags here. Tags missing from the uploaded JSON remain alive
+    // so any existing AngelScript RegisterGlobalProperty() pointers stay valid.
     ensure_runtime_diagnostic_tags_nolock();
+    ensure_compatibility_tags_nolock();
     bool saved = save_file ? save_to_tags_file_nolock() : true;
     xSemaphoreGive(g_tags_mutex);
-    free(new_tags);
+
+    if (g_loaded) script_engine_resume_after_runtime_update();
+
+    free(uploaded_tags);
     if (!saved) ESP_LOGW(TAG, "Tags updated in RAM but LittleFS tag file save failed");
     set_err(err, err_len, saved ? "OK" : "Tags updated in RAM, LittleFS tag file save failed");
     return true;
@@ -697,6 +790,21 @@ static bool plc_tags_load_json_internal(const char* json, bool save_file, char* 
 bool plc_tags_load_json(const char* json, char* err, size_t err_len)
 {
     return plc_tags_load_json_internal(json, true, err, err_len);
+}
+
+bool plc_tags_load_json_ram(const char* json, char* err, size_t err_len)
+{
+    return plc_tags_load_json_internal(json, false, err, err_len);
+}
+
+bool plc_tags_save_to_flash(char* err, size_t err_len)
+{
+    if (!g_tags_mutex) plc_tags_init();
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    bool ok = save_to_tags_file_nolock();
+    xSemaphoreGive(g_tags_mutex);
+    set_err(err, err_len, ok ? "OK" : "LittleFS tag file save failed");
+    return ok;
 }
 
 void plc_tags_init(void)
@@ -813,6 +921,10 @@ bool plc_tags_set_value_int(const char* name, int32_t value, char* err, size_t e
     RuntimeTag& t = g_tags[idx];
     if (!t.writable) { xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "Tag is not writable"); return false; }
     if (t.type != PLC_TAG_INT) { xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "Tag is not int"); return false; }
+    if (t.max_value > t.min_value) {
+        if ((float)value < t.min_value) value = (int32_t)t.min_value;
+        if ((float)value > t.max_value) value = (int32_t)t.max_value;
+    }
     t.value.i = value;
     // Runtime value writes update RAM only. They must never commit LittleFS/flash.
     xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "OK"); return true;
@@ -826,6 +938,10 @@ bool plc_tags_set_value_float(const char* name, float value, char* err, size_t e
     RuntimeTag& t = g_tags[idx];
     if (!t.writable) { xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "Tag is not writable"); return false; }
     if (t.type != PLC_TAG_FLOAT) { xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "Tag is not float"); return false; }
+    if (t.max_value > t.min_value) {
+        if (value < t.min_value) value = t.min_value;
+        if (value > t.max_value) value = t.max_value;
+    }
     t.value.f = value;
     // Runtime value writes update RAM only. They must never commit LittleFS/flash.
     xSemaphoreGive(g_tags_mutex); set_err(err, err_len, "OK"); return true;
@@ -905,6 +1021,161 @@ bool plc_tags_register_angelscript_globals(asIScriptEngine* engine, char* err, s
         }
     }
 
+    set_err(err, err_len, "OK");
+    return true;
+}
+
+
+
+static bool pilab_param_type_from_name(const char* type_name, PlcTagType* out)
+{
+    if (!type_name || !out) return false;
+    if (strcmp(type_name, "bool") == 0) { *out = PLC_TAG_BOOL; return true; }
+    if (strcmp(type_name, "int") == 0 || strcmp(type_name, "uint") == 0) { *out = PLC_TAG_INT; return true; }
+    if (strcmp(type_name, "float") == 0 || strcmp(type_name, "double") == 0) { *out = PLC_TAG_FLOAT; return true; }
+    return false;
+}
+
+bool plc_tags_ensure_param_tag(const char* name, const char* type_name, const char* default_value,
+                               float min_value, float max_value, const char* units,
+                               const char* description, char* err, size_t err_len)
+{
+    if (!g_tags_mutex) plc_tags_init();
+    if (!plc_tags_is_valid_name(name, err, err_len)) return false;
+
+    PlcTagType type = PLC_TAG_INT;
+    if (!pilab_param_type_from_name(type_name, &type)) {
+        set_err(err, err_len, "Unsupported parameter tag type");
+        return false;
+    }
+
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    int idx = find_tag_index_nolock(name);
+    if (idx >= 0) {
+        RuntimeTag& t = g_tags[idx];
+        if (t.type != type) {
+            xSemaphoreGive(g_tags_mutex);
+            set_err(err, err_len, "Existing parameter tag has different type");
+            return false;
+        }
+        // Preserve the live value, but refresh the metadata/visibility contract.
+        t.writable = true;
+        t.retentive = true;
+        t.hmi_visible = true;
+        t.script_visible = true;
+        t.min_value = min_value;
+        t.max_value = max_value;
+        if (units) snprintf(t.units, sizeof(t.units), "%.*s", (int)(sizeof(t.units) - 1), units);
+        if (description && description[0]) snprintf(t.description, sizeof(t.description), "%.*s", (int)(PLC_TAG_DESC_MAX - 1), description);
+        // Clamp existing numeric values into the declared range if a real range was provided.
+        if (t.max_value > t.min_value) {
+            if (t.type == PLC_TAG_INT) {
+                if ((float)t.value.i < t.min_value) t.value.i = (int32_t)t.min_value;
+                if ((float)t.value.i > t.max_value) t.value.i = (int32_t)t.max_value;
+            } else if (t.type == PLC_TAG_FLOAT) {
+                if (t.value.f < t.min_value) t.value.f = t.min_value;
+                if (t.value.f > t.max_value) t.value.f = t.max_value;
+            }
+        }
+        xSemaphoreGive(g_tags_mutex);
+        set_err(err, err_len, "OK");
+        return true;
+    }
+
+    if (g_tag_count >= PLC_TAG_MAX_COUNT) {
+        xSemaphoreGive(g_tags_mutex);
+        set_err(err, err_len, "Tag table full");
+        return false;
+    }
+
+    RuntimeTag& t = g_tags[g_tag_count++];
+    memset(&t, 0, sizeof(t));
+    snprintf(t.name, sizeof(t.name), "%.*s", (int)(PLC_TAG_NAME_MAX - 1), name);
+    t.type = type;
+    t.writable = true;
+    t.retentive = true;
+    t.hmi_visible = true;
+    t.script_visible = true;
+    t.min_value = min_value;
+    t.max_value = max_value;
+    snprintf(t.units, sizeof(t.units), "%.*s", (int)(sizeof(t.units) - 1), units ? units : "");
+    snprintf(t.description, sizeof(t.description), "%.*s", (int)(PLC_TAG_DESC_MAX - 1), description ? description : "PiLab parameter tag");
+
+    if (type == PLC_TAG_BOOL) {
+        t.value.b = default_value && (strcmp(default_value, "true") == 0 || strcmp(default_value, "1") == 0);
+    } else if (type == PLC_TAG_INT) {
+        int32_t v = default_value ? (int32_t)strtol(default_value, nullptr, 10) : 0;
+        if (t.max_value > t.min_value) {
+            if ((float)v < t.min_value) v = (int32_t)t.min_value;
+            if ((float)v > t.max_value) v = (int32_t)t.max_value;
+        }
+        t.value.i = v;
+    } else {
+        float v = default_value ? strtof(default_value, nullptr) : 0.0f;
+        if (t.max_value > t.min_value) {
+            if (v < t.min_value) v = t.min_value;
+            if (v > t.max_value) v = t.max_value;
+        }
+        t.value.f = v;
+    }
+
+    xSemaphoreGive(g_tags_mutex);
+    set_err(err, err_len, "OK");
+    return true;
+}
+
+bool plc_tags_ensure_monitor_tag(const char* name, const char* type_name, const char* description, char* err, size_t err_len)
+{
+    if (!g_tags_mutex) plc_tags_init();
+    if (!plc_tags_is_valid_name(name, err, err_len)) return false;
+
+    PlcTagType type = PLC_TAG_FLOAT;
+    if (!type_name || strcmp(type_name, "float") == 0) type = PLC_TAG_FLOAT;
+    else if (strcmp(type_name, "bool") == 0) type = PLC_TAG_BOOL;
+    else if (strcmp(type_name, "int") == 0 || strcmp(type_name, "uint") == 0) type = PLC_TAG_INT;
+    else {
+        set_err(err, err_len, "Unsupported monitor tag type");
+        return false;
+    }
+
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    int idx = find_tag_index_nolock(name);
+    if (idx >= 0) {
+        RuntimeTag& t = g_tags[idx];
+        if (t.type != type) {
+            xSemaphoreGive(g_tags_mutex);
+            set_err(err, err_len, "Existing tag has different type");
+            return false;
+        }
+        t.writable = false;
+        t.retentive = false;
+        t.hmi_visible = true;
+        t.script_visible = true;
+        if (description && description[0]) snprintf(t.description, sizeof(t.description), "%.*s", (int)(PLC_TAG_DESC_MAX - 1), description);
+        xSemaphoreGive(g_tags_mutex);
+        set_err(err, err_len, "OK");
+        return true;
+    }
+
+    if (g_tag_count >= PLC_TAG_MAX_COUNT) {
+        xSemaphoreGive(g_tags_mutex);
+        set_err(err, err_len, "Tag table full");
+        return false;
+    }
+
+    RuntimeTag& t = g_tags[g_tag_count++];
+    memset(&t, 0, sizeof(t));
+    snprintf(t.name, sizeof(t.name), "%.*s", (int)(PLC_TAG_NAME_MAX - 1), name);
+    t.type = type;
+    t.writable = false;
+    t.retentive = false;
+    t.hmi_visible = true;
+    t.script_visible = true;
+    snprintf(t.description, sizeof(t.description), "%.*s", (int)(PLC_TAG_DESC_MAX - 1), description ? description : "PiLab monitor tag");
+    if (type == PLC_TAG_BOOL) t.value.b = false;
+    else if (type == PLC_TAG_INT) t.value.i = 0;
+    else t.value.f = 0.0f;
+    xSemaphoreGive(g_tags_mutex);
     set_err(err, err_len, "OK");
     return true;
 }

@@ -1,6 +1,52 @@
 // Ladder wire-node graph and AngelScript transpiler.
 export const ladderTranspilerMethods = {
 sanitize(s){ return String(s||'TAG').replace(/[^A-Za-z0-9_]/g,'_').replace(/^([0-9])/,'_$1'); },
+blockParamName(e){
+      if(!e) return '';
+      if(e.type==='TON'||e.type==='TOF') return 'PT';
+      if(e.type==='CTU'||e.type==='CTD') return 'PV';
+      return '';
+    },
+blockParamDefault(e){
+      if(!e) return 0;
+      return Number(e.preset || ((e.type==='TON'||e.type==='TOF') ? 1000 : 10));
+    },
+blockParamUnits(e){ return e && (e.type==='TON'||e.type==='TOF') ? 'ms' : 'count'; },
+blockParamIsEnabled(e){ return !!(e && e.param && e.param.enabled); },
+blockParamTag(e){
+      if(!e) return '';
+      const explicit = e.param && e.param.tag;
+      if(explicit) return this.sanitize(explicit);
+      const name = this.blockParamName(e);
+      return name ? `${this.sanitize(e.tag)}_${name}` : '';
+    },
+blockParamType(e){ return 'int'; },
+blockParamMin(e){
+      const v = e && e.param ? Number(e.param.min) : NaN;
+      return Number.isFinite(v) ? v : 0;
+    },
+blockParamMax(e){
+      const v = e && e.param ? Number(e.param.max) : NaN;
+      return Number.isFinite(v) ? v : ((e && (e.type==='TON'||e.type==='TOF')) ? 600000 : 999999);
+    },
+blockPresetExpression(e){ return this.blockParamIsEnabled(e) ? this.blockParamTag(e) : String(this.blockParamDefault(e)); },
+blockMonitorFields(e){
+      if(!e) return [];
+      if(e.type==='TON'||e.type==='TOF') return ['Q:bool','ET:int','PT:int'];
+      if(e.type==='CTU'||e.type==='CTD') return ['Q:bool','CV:int','PV:int'];
+      return [];
+    },
+blockMonitorAnnotation(e){
+      const fields = this.blockMonitorFields(e);
+      if(!e || !fields.length) return '';
+      return `[PiLabMonitor name="${this.sanitize(e.tag)}" type="${e.type}" fields="${fields.join(',')}"]`;
+    },
+blockParamAnnotation(e){
+      if(!this.blockParamIsEnabled(e)) return '';
+      const paramName = this.blockParamName(e);
+      if(!paramName) return '';
+      return `[PiLabParam name="${paramName}" tag="${this.blockParamTag(e)}" type="${this.blockParamType(e)}" default="${this.blockParamDefault(e)}" min="${this.blockParamMin(e)}" max="${this.blockParamMax(e)}"]`;
+    },
 uniqueTypes(types){
       const m=new Map();
       for(const e of this.allElements()) if(types.includes(e.type)) m.set(e.type+':'+this.sanitize(e.tag), e);
@@ -909,7 +955,8 @@ angelScriptIndentBlock(code, indent='    '){
       if(timers.length){
         s+='class TON\n{\n';
         s+='    uint preset_ms;\n    uint elapsed_ms = 0;\n    bool output = false;\n\n';
-        s+='    TON(uint preset) { preset_ms = preset; }\n\n';
+        s+='    TON(uint preset) { preset_ms = preset; }\n';
+        s+='    void SetPreset(uint preset) { preset_ms = preset; if (elapsed_ms > preset_ms) elapsed_ms = preset_ms; }\n\n';
         s+='    void update(bool input, uint scan_ms)\n    {\n';
         s+='        if (input)\n        {\n';
         s+='            if (elapsed_ms < preset_ms) elapsed_ms += scan_ms;\n';
@@ -917,11 +964,12 @@ angelScriptIndentBlock(code, indent='    '){
         s+='        }\n        else\n        {\n';
         s+='            elapsed_ms = 0;\n            output = false;\n';
         s+='        }\n    }\n\n';
-        s+='    bool Q() const { return output; }\n    uint ET() const { return elapsed_ms; }\n};\n\n';
+        s+='    bool Q() const { return output; }\n    uint ET() const { return elapsed_ms; }\n    uint PT() const { return preset_ms; }\n};\n\n';
 
         s+='class TOF\n{\n';
         s+='    uint preset_ms;\n    uint elapsed_ms = 0;\n    bool output = false;\n\n';
-        s+='    TOF(uint preset) { preset_ms = preset; }\n\n';
+        s+='    TOF(uint preset) { preset_ms = preset; }\n';
+        s+='    void SetPreset(uint preset) { preset_ms = preset; if (elapsed_ms > preset_ms) elapsed_ms = preset_ms; }\n\n';
         s+='    void update(bool input, uint scan_ms)\n    {\n';
         s+='        if (input)\n        {\n';
         s+='            output = true;\n            elapsed_ms = 0;\n';
@@ -934,27 +982,29 @@ angelScriptIndentBlock(code, indent='    '){
         s+='            elapsed_ms = preset_ms;\n';
         s+='        }\n';
         s+='    }\n\n';
-        s+='    bool Q() const { return output; }\n    uint ET() const { return elapsed_ms; }\n};\n\n';
+        s+='    bool Q() const { return output; }\n    uint ET() const { return elapsed_ms; }\n    uint PT() const { return preset_ms; }\n};\n\n';
       }
 
       if(counters.length){
         if(counters.some(c=>c.type==='CTU')){
           s+='class CTU\n{\n';
           s+='    uint preset;\n    uint count = 0;\n    bool last = false;\n    bool output = false;\n\n';
-          s+='    CTU(uint pv) { preset = pv; }\n\n';
+          s+='    CTU(uint pv) { preset = pv; }\n';
+          s+='    void SetPreset(uint pv) { preset = pv; }\n\n';
           s+='    void update(bool input, bool reset=false)\n    {\n';
           s+='        if (reset) { count = 0; output = false; last = input; return; }\n';
           s+='        if (input && !last && count < preset) count++;\n        last = input;\n        output = count >= preset;\n';
-          s+='    }\n\n    bool Q() const { return output; }\n    uint CV() const { return count; }\n};\n\n';
+          s+='    }\n\n    bool Q() const { return output; }\n    uint CV() const { return count; }\n    uint PV() const { return preset; }\n};\n\n';
         }
         if(counters.some(c=>c.type==='CTD')){
           s+='class CTD\n{\n';
           s+='    uint preset;\n    uint count;\n    bool last = false;\n    bool output = false;\n\n';
-          s+='    CTD(uint pv) { preset = pv; count = pv; output = count == 0; }\n\n';
+          s+='    CTD(uint pv) { preset = pv; count = pv; output = count == 0; }\n';
+          s+='    void SetPreset(uint pv) { preset = pv; if (count > preset) count = preset; output = count == 0; }\n\n';
           s+='    void update(bool input, bool load=false)\n    {\n';
           s+='        if (load) { count = preset; output = false; last = input; return; }\n';
           s+='        if (input && !last && count > 0) count--;\n        last = input;\n        output = count == 0;\n';
-          s+='    }\n\n    bool Q() const { return output; }\n    uint CV() const { return count; }\n};\n\n';
+          s+='    }\n\n    bool Q() const { return output; }\n    uint CV() const { return count; }\n    uint PV() const { return preset; }\n};\n\n';
         }
       }
 
@@ -966,8 +1016,20 @@ angelScriptIndentBlock(code, indent='    '){
         s+='    }\n\n    bool Q() const { return output; }\n};\n\n';
       }
 
-      for(const t of timers) s+=t.type+' '+this.sanitize(t.tag)+'('+(t.preset||1000)+');\n';
-      for(const c of counters) s+=c.type+' '+this.sanitize(c.tag)+'('+(c.preset||10)+');\n';
+      for(const t of timers){
+        const param = this.blockParamAnnotation(t);
+        const monitor = this.blockMonitorAnnotation(t);
+        if(param) s+=param+'\n';
+        if(monitor) s+=monitor+'\n';
+        s+=t.type+' '+this.sanitize(t.tag)+'('+(t.preset||1000)+');\n';
+      }
+      for(const c of counters){
+        const param = this.blockParamAnnotation(c);
+        const monitor = this.blockMonitorAnnotation(c);
+        if(param) s+=param+'\n';
+        if(monitor) s+=monitor+'\n';
+        s+=c.type+' '+this.sanitize(c.tag)+'('+(c.preset||10)+');\n';
+      }
       for(const o of oneShots) s+='ONS '+this.sanitize(o.tag)+';\n';
       if(timers.length||counters.length||oneShots.length) s+='\n';
 
@@ -1002,6 +1064,7 @@ angelScriptIndentBlock(code, indent='    '){
         for(const u of updateBlocks.filter(x=>x.e.type==='CTU'||x.e.type==='CTD')){
           const controlExpr = this.counterControlExpr ? this.counterControlExpr(u.e) : String(u.e.resetTag || '');
           const resetExpr = controlExpr ? (this.normalizeBoolExpression(controlExpr) || 'false') : 'false';
+          if(this.blockParamIsEnabled(u.e)) s+='    '+this.sanitize(u.e.tag)+'.SetPreset(uint('+this.blockParamTag(u.e)+'));\n';
           s+='    '+this.sanitize(u.e.tag)+'.update(('+u.cond+'), ('+resetExpr+'));\n';
         }
 
@@ -1010,6 +1073,7 @@ angelScriptIndentBlock(code, indent='    '){
         for(const w of this.latchWrites(r)) s+='    if ('+w.cond+') '+this.sanitize(w.e.tag)+' = '+(w.e.type==='SET'?'true':'false')+';\n';
         for(const o of this.outputs(r)) s+='    '+this.sanitize(o.tag)+' = rung_'+(i+1)+';\n';
         for(const u of updateBlocks.filter(x=>x.e.type==='TON'||x.e.type==='TOF')){
+          if(this.blockParamIsEnabled(u.e)) s+='    '+this.sanitize(u.e.tag)+'.SetPreset(uint('+this.blockParamTag(u.e)+'));\n';
           s+='    '+this.sanitize(u.e.tag)+'.update(('+u.cond+'), '+scanMs+');\n';
         }
         s+='\n';

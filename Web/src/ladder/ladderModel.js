@@ -60,9 +60,9 @@ createBranch(start,end){ return { id:this.uid(), start, end, cells:Array(8).fill
 cloneRungDeep(r){ const c=JSON.parse(JSON.stringify(r)); const renew=(obj)=>{ if(obj&&typeof obj==='object'){ if(obj.id) obj.id=this.uid(); for(const k in obj) renew(obj[k]); }}; renew(c); return c; },
 newSymbol(t){
       const e={id:this.uid(), type:t, tag:this.defaultTag(t)};
-      if(t==='TON'||t==='TOF') e.preset=1000;
-      if(t==='CTU') { e.preset=10; e.resetTag='ResetPB'; }
-      if(t==='CTD') { e.preset=10; e.resetTag='ReloadPB'; }
+      if(t==='TON'||t==='TOF') { e.preset=1000; e.param={enabled:false, tag:`${e.tag}_PT`, min:0, max:600000}; }
+      if(t==='CTU') { e.preset=10; e.resetTag='ResetPB'; e.param={enabled:false, tag:`${e.tag}_PV`, min:0, max:999999}; }
+      if(t==='CTD') { e.preset=10; e.resetTag='ReloadPB'; e.param={enabled:false, tag:`${e.tag}_PV`, min:0, max:999999}; }
       return e;
     },
 defaultTag(t){
@@ -111,6 +111,18 @@ normalizeImportedProject(p){
           while(b.cells.length < 8) b.cells.push(null);
           if(b.cells.length > 8) b.cells = b.cells.slice(0,8);
         }
+        const normalizeSymbolParam = (e) => {
+          if(!e || !['TON','TOF','CTU','CTD'].includes(e.type)) return;
+          const paramName = (e.type==='TON'||e.type==='TOF') ? 'PT' : 'PV';
+          const defaultMax = (e.type==='TON'||e.type==='TOF') ? 600000 : 999999;
+          if(!e.param || typeof e.param !== 'object') e.param = { enabled:false };
+          if(typeof e.param.enabled !== 'boolean') e.param.enabled = !!e.param.enabled;
+          if(!e.param.tag) e.param.tag = `${this.sanitize(e.tag)}_${paramName}`;
+          if(!Number.isFinite(Number(e.param.min))) e.param.min = 0;
+          if(!Number.isFinite(Number(e.param.max))) e.param.max = defaultMax;
+        };
+        (r.main||[]).forEach(normalizeSymbolParam);
+        for(const b of (r.branches||[])) (b.cells||[]).forEach(normalizeSymbolParam);
       }
       assertValidLadderProjectShape(p);
     },
