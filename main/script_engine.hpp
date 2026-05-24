@@ -44,6 +44,11 @@ bool script_engine_can_accept_upload(char* response_buf, size_t response_buf_len
 // Called by the deterministic scan task. Executes the currently active compiled scan().
 void script_engine_set_scan_timing(uint32_t delta_us, uint32_t actual_period_us, uint32_t budget_us);
 bool script_engine_run_scan(void);
+uint32_t script_engine_get_vm_last_us(void);
+uint32_t script_engine_get_vm_max_us(void);
+uint32_t script_engine_get_vm_ema_us(void);
+uint32_t script_engine_get_vm_window_avg_us(void);
+uint32_t script_engine_get_vm_window_max_us(void);
 
 uint32_t script_engine_get_generation(void);
 const char* script_engine_get_last_error(void);

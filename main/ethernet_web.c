@@ -27,6 +27,7 @@
 #include <strings.h>
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -51,7 +52,8 @@ static const char *TAG = "ETH_WEB";
 // The HTTP GET handler serves this prebuilt JSON buffer instead of rebuilding
 // process/tag JSON on every browser/HMI request. This keeps refresh storms from
 // repeatedly touching live PLC state, allocating heap, or formatting JSON.
-#define PLC_DATA_CACHE_PERIOD_MS    100
+#define TAG_DATA_CACHE_PERIOD_MS     100
+#define TAG_DATA_JSON_CAP            (16 * 1024)
 #define PLC_DATA_CACHE_STACK_WORDS  8192
 #define PLC_DATA_CACHE_PRIORITY     1
 
@@ -67,6 +69,37 @@ static uint32_t g_plc_data_cache_point_count = 0;
 static uint32_t g_plc_data_cache_build_us = 0;
 static int64_t g_plc_data_cache_snapshot_us = 0;
 static bool g_plc_data_cache_ready = false;
+static uint32_t g_plc_data_cache_build_max_us = 0;
+static uint32_t g_http_plc_data_send_max_us = 0;
+
+static SemaphoreHandle_t g_tag_data_cache_mutex = NULL;
+static char *g_tag_data_cache_json = NULL;
+static size_t g_tag_data_cache_len = 0;
+static uint32_t g_tag_data_cache_version = 0;
+static uint32_t g_tag_data_cache_build_us = 0;
+static uint32_t g_tag_data_cache_build_max_us = 0;
+static int64_t g_tag_data_cache_snapshot_us = 0;
+static bool g_tag_data_cache_ready = false;
+static uint32_t g_http_tag_data_send_max_us = 0;
+static uint32_t g_plc_data_cache_script_generation = UINT32_MAX;
+static volatile bool g_plc_data_cache_force_rebuild = false;
+
+typedef struct PlcDataBuildTiming {
+    uint32_t io_snapshot_us;
+    uint32_t script_name_us;
+    uint32_t tag_copy_us;
+    uint32_t json_format_us;
+} PlcDataBuildTiming;
+
+typedef struct TagDataBuildTiming {
+    uint32_t tag_copy_us;
+    uint32_t json_format_us;
+} TagDataBuildTiming;
+
+static int32_t clamp_u32_to_i32(uint32_t v)
+{
+    return v > (uint32_t)INT_MAX ? INT_MAX : (int32_t)v;
+}
 
 // Static IP settings
 static const char *STATIC_IP_ADDR = "192.168.5.210";
@@ -371,7 +404,7 @@ static esp_err_t system_overview_get_handler(httpd_req_t *req)
         "\"raw_di_mask\":%lu,"
         "\"di_mask\":%lu,"
         "\"do_mask\":%lu,"
-        "\"cache_period_ms\":%u,"
+        "\"cache_period_ms\":0,"
         "\"cache_version\":%lu,"
         "\"cache_points\":%lu,"
         "\"cache_bytes\":%lu,"
@@ -399,7 +432,6 @@ static esp_err_t system_overview_get_handler(httpd_req_t *req)
         (unsigned long)snap.raw_di_mask,
         (unsigned long)snap.di_mask,
         (unsigned long)snap.do_mask,
-        (unsigned)PLC_DATA_CACHE_PERIOD_MS,
         (unsigned long)cache_version,
         (unsigned long)cache_points,
         (unsigned long)cache_bytes,
@@ -489,7 +521,7 @@ static esp_err_t command_center_get_handler(httpd_req_t *req)
         "\"raw_di_mask\":%lu,"
         "\"di_mask\":%lu,"
         "\"do_mask\":%lu,"
-        "\"cache_period_ms\":%u,"
+        "\"cache_period_ms\":0,"
         "\"dashboard_period_ms\":1000,"
         "\"cache_version\":%lu,"
         "\"cache_points\":%lu,"
@@ -528,7 +560,6 @@ static esp_err_t command_center_get_handler(httpd_req_t *req)
         (unsigned long)snap.raw_di_mask,
         (unsigned long)snap.di_mask,
         (unsigned long)snap.do_mask,
-        (unsigned)PLC_DATA_CACHE_PERIOD_MS,
         (unsigned long)cache_version,
         (unsigned long)cache_points,
         (unsigned long)cache_bytes,
@@ -718,6 +749,21 @@ static bool append_jsonf(char **p, size_t *rem, const char *fmt, ...)
     return true;
 }
 
+static bool append_json_literal(char **p, size_t *rem, const char *s)
+{
+    if (!p || !*p || !rem || *rem == 0 || !s) return false;
+    size_t n = strlen(s);
+    if (n >= *rem) {
+        **p = '\0';
+        return false;
+    }
+    memcpy(*p, s, n);
+    *p += n;
+    *rem -= n;
+    **p = '\0';
+    return true;
+}
+
 static bool plc_data_build_json_into(char *json,
                                      size_t json_cap,
                                      PlcTagInfo *user_tags,
@@ -725,7 +771,8 @@ static bool plc_data_build_json_into(char *json,
                                      size_t *out_len,
                                      uint32_t *out_point_count,
                                      uint32_t *out_build_us,
-                                     int64_t *out_snapshot_us)
+                                     int64_t *out_snapshot_us,
+                                     PlcDataBuildTiming *out_timing)
 {
     if (!json || json_cap == 0 || !out_len || !out_point_count) {
         return false;
@@ -734,13 +781,18 @@ static bool plc_data_build_json_into(char *json,
     const int64_t start_us = esp_timer_get_time();
 
     PlcIoSnapshot snap;
+    const int64_t io_start_us = esp_timer_get_time();
     plc_io_get_snapshot(&snap);
+    const uint32_t io_snapshot_us = (uint32_t)(esp_timer_get_time() - io_start_us);
 
     char active_script_name[96] = {0};
+    const int64_t script_name_start_us = esp_timer_get_time();
     script_engine_get_active_script_name(active_script_name, sizeof(active_script_name));
+    const uint32_t script_name_us = (uint32_t)(esp_timer_get_time() - script_name_start_us);
 
     size_t user_tag_count = 0;
     size_t visible_user_tag_count = 0;
+    const int64_t tag_copy_start_us = esp_timer_get_time();
     if (user_tags && user_tags_cap > 0) {
         user_tag_count = plc_tags_copy_all(user_tags, user_tags_cap);
         for (size_t i = 0; i < user_tag_count; ++i) {
@@ -749,7 +801,9 @@ static bool plc_data_build_json_into(char *json,
             }
         }
     }
+    const uint32_t tag_copy_us = (uint32_t)(esp_timer_get_time() - tag_copy_start_us);
 
+    const int64_t json_format_start_us = esp_timer_get_time();
     char *p = json;
     size_t rem = json_cap;
     bool ok = true;
@@ -758,7 +812,8 @@ static bool plc_data_build_json_into(char *json,
     ok = ok && append_jsonf(&p, &rem,
         "{\"endpoint\":\"/api/plc_data\"," 
         "\"cached\":true,"
-        "\"cache_period_ms\":%u,"
+        "\"cache_period_ms\":0,"
+        "\"cache_version\":%lu,"
         "\"snapshot_us\":%llu,"
         "\"tick_count\":%lu,"
         "\"script_scan_count\":%lu,"
@@ -769,7 +824,7 @@ static bool plc_data_build_json_into(char *json,
         "\"active_script_name\":\"%s\","
         "\"active_script_path\":\"%s%s\","
         "\"points\":[",
-        (unsigned)PLC_DATA_CACHE_PERIOD_MS,
+        (unsigned long)(g_plc_data_cache_version + 1u),
         (unsigned long long)start_us,
         (unsigned long)snap.tick_count,
         (unsigned long)snap.script_scan_count,
@@ -872,7 +927,8 @@ static bool plc_data_build_json_into(char *json,
     }
 #endif
 
-    const uint32_t build_us = (uint32_t)(esp_timer_get_time() - start_us);
+    const uint32_t json_format_us_before_footer = (uint32_t)(esp_timer_get_time() - json_format_start_us);
+    uint32_t build_us = (uint32_t)(esp_timer_get_time() - start_us);
     ok = ok && append_jsonf(&p, &rem,
         "],\"point_count\":%lu,\"sim_count\":%u,\"user_tag_count\":%lu,\"build_us\":%lu}",
         (unsigned long)point_count,
@@ -885,11 +941,153 @@ static bool plc_data_build_json_into(char *json,
         return false;
     }
 
+    build_us = (uint32_t)(esp_timer_get_time() - start_us);
     *out_len = (size_t)(p - json);
     *out_point_count = point_count;
     if (out_build_us) *out_build_us = build_us;
     if (out_snapshot_us) *out_snapshot_us = start_us;
+    if (out_timing) {
+        out_timing->io_snapshot_us = io_snapshot_us;
+        out_timing->script_name_us = script_name_us;
+        out_timing->tag_copy_us = tag_copy_us;
+        // Include the footer append in format time.
+        out_timing->json_format_us = (uint32_t)(esp_timer_get_time() - json_format_start_us);
+        if (out_timing->json_format_us < json_format_us_before_footer) {
+            out_timing->json_format_us = json_format_us_before_footer;
+        }
+    }
     return true;
+}
+
+static bool tag_data_build_json_into(char *json,
+                                     size_t json_cap,
+                                     PlcTagIndexedValueInfo *tag_values,
+                                     size_t tag_values_cap,
+                                     size_t *out_len,
+                                     uint32_t *out_point_count,
+                                     uint32_t *out_build_us,
+                                     int64_t *out_snapshot_us,
+                                     TagDataBuildTiming *out_timing)
+{
+    if (!json || json_cap == 0 || !out_len || !out_point_count) {
+        return false;
+    }
+
+    const int64_t start_us = esp_timer_get_time();
+
+    PlcIoSnapshot snap;
+    plc_io_get_snapshot(&snap);
+
+    size_t tag_value_count = 0;
+    const int64_t tag_copy_start_us = esp_timer_get_time();
+    if (tag_values && tag_values_cap > 0) {
+        tag_value_count = plc_tags_copy_hmi_indexed_values(tag_values, tag_values_cap);
+    }
+    const uint32_t tag_copy_us = (uint32_t)(esp_timer_get_time() - tag_copy_start_us);
+
+    const int64_t json_format_start_us = esp_timer_get_time();
+    char *p = json;
+    size_t rem = json_cap;
+    bool ok = true;
+    uint32_t point_count = 0;
+
+    // Indexed compact hot-path JSON. The full /api/plc_data layout defines
+    // point order. /api/tag_data only sends the values array in that same order,
+    // avoiding repeated tag names every 100 ms.
+    ok = ok && append_jsonf(&p, &rem,
+        "{\"e\":\"tag_data\",\"c\":true,"
+        "\"i\":true,"
+        "\"l\":%lu,"
+        "\"v\":%lu,"
+        "\"ts\":%llu,"
+        "\"tc\":%lu,"
+        "\"ssc\":%lu,"
+        "\"owc\":%lu,"
+        "\"rim\":%lu,"
+        "\"dim\":%lu,"
+        "\"dom\":%lu,"
+        "\"a\":[",
+        (unsigned long)g_plc_data_cache_version,
+        (unsigned long)(g_tag_data_cache_version + 1u),
+        (unsigned long long)start_us,
+        (unsigned long)snap.tick_count,
+        (unsigned long)snap.script_scan_count,
+        (unsigned long)snap.output_write_count,
+        (unsigned long)snap.raw_di_mask,
+        (unsigned long)snap.di_mask,
+        (unsigned long)snap.do_mask);
+
+    bool first = true;
+#define APPEND_VALUE_PREFIX() do { \
+        if (!first) ok = ok && append_json_literal(&p, &rem, ","); \
+        first = false; \
+    } while (0)
+
+    for (int i = 0; ok && i < PLC_DI_COUNT; ++i) {
+        APPEND_VALUE_PREFIX();
+        ok = ok && append_json_literal(&p, &rem, snap.debounced_di[i] ? "true" : "false");
+        point_count++;
+    }
+    for (int i = 0; ok && i < PLC_DO_COUNT; ++i) {
+        APPEND_VALUE_PREFIX();
+        ok = ok && append_json_literal(&p, &rem, snap.do_cmd[i] ? "true" : "false");
+        point_count++;
+    }
+    for (int i = 0; ok && i < PLC_AI_COUNT; ++i) {
+        APPEND_VALUE_PREFIX();
+        ok = ok && append_jsonf(&p, &rem, "%.3f", (double)snap.ai[i]);
+        point_count++;
+    }
+    for (int i = 0; ok && i < PLC_AO_COUNT; ++i) {
+        APPEND_VALUE_PREFIX();
+        ok = ok && append_jsonf(&p, &rem, "%.3f", (double)snap.ao[i]);
+        point_count++;
+    }
+
+    for (size_t i = 0; ok && i < tag_value_count; ++i) {
+        const PlcTagIndexedValueInfo *t = &tag_values[i];
+        APPEND_VALUE_PREFIX();
+        if (t->type == PLC_TAG_BOOL) {
+            ok = ok && append_json_literal(&p, &rem, t->value.b ? "true" : "false");
+        } else if (t->type == PLC_TAG_INT) {
+            ok = ok && append_jsonf(&p, &rem, "%ld", (long)t->value.i);
+        } else {
+            ok = ok && append_jsonf(&p, &rem, "%.6g", (double)t->value.f);
+        }
+        point_count++;
+    }
+
+#undef APPEND_VALUE_PREFIX
+
+    uint32_t build_us = (uint32_t)(esp_timer_get_time() - start_us);
+    ok = ok && append_jsonf(&p, &rem,
+        "],\"pc\":%lu,\"bu\":%lu}",
+        (unsigned long)point_count,
+        (unsigned long)build_us);
+
+    if (!ok) {
+        if (json_cap > 0) json[0] = '\0';
+        return false;
+    }
+
+    build_us = (uint32_t)(esp_timer_get_time() - start_us);
+    *out_len = (size_t)(p - json);
+    *out_point_count = point_count;
+    if (out_build_us) *out_build_us = build_us;
+    if (out_snapshot_us) *out_snapshot_us = start_us;
+    if (out_timing) {
+        out_timing->tag_copy_us = tag_copy_us;
+        out_timing->json_format_us = (uint32_t)(esp_timer_get_time() - json_format_start_us);
+    }
+    return true;
+}
+
+static void plc_data_cache_request_full_rebuild(const char *reason)
+{
+    g_plc_data_cache_force_rebuild = true;
+    ESP_LOGI(TAG, "PLC data full-cache rebuild requested%s%s",
+             reason ? ": " : "",
+             reason ? reason : "");
 }
 
 static void plc_data_cache_task(void *arg)
@@ -901,6 +1099,24 @@ static void plc_data_cache_task(void *arg)
     char *build_json = (char*)heap_caps_malloc(PLC_DATA_JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!build_json) {
         build_json = (char*)heap_caps_malloc(PLC_DATA_JSON_CAP, MALLOC_CAP_8BIT);
+    }
+
+    char *tag_json = (char*)heap_caps_malloc(TAG_DATA_JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!tag_json) {
+        tag_json = (char*)heap_caps_malloc(TAG_DATA_JSON_CAP, MALLOC_CAP_8BIT);
+    }
+
+    PlcTagIndexedValueInfo *tag_values = (PlcTagIndexedValueInfo*)heap_caps_calloc(
+        PLC_TAG_MAX_COUNT,
+        sizeof(PlcTagIndexedValueInfo),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+    );
+    if (!tag_values) {
+        tag_values = (PlcTagIndexedValueInfo*)heap_caps_calloc(
+            PLC_TAG_MAX_COUNT,
+            sizeof(PlcTagIndexedValueInfo),
+            MALLOC_CAP_8BIT
+        );
     }
 
     PlcTagInfo *user_tags = (PlcTagInfo*)heap_caps_calloc(
@@ -916,51 +1132,135 @@ static void plc_data_cache_task(void *arg)
         );
     }
 
-    if (!build_json || !user_tags) {
+    if (!build_json || !tag_json || !tag_values || !user_tags) {
         ESP_LOGE(TAG, "PLC data cache task allocation failed");
         if (build_json) heap_caps_free(build_json);
+        if (tag_json) heap_caps_free(tag_json);
+        if (tag_values) heap_caps_free(tag_values);
         if (user_tags) heap_caps_free(user_tags);
         g_plc_data_cache_task = NULL;
         vTaskDelete(NULL);
         return;
     }
 
-    ESP_LOGI(TAG, "PLC data cache task started: period=%u ms", (unsigned)PLC_DATA_CACHE_PERIOD_MS);
+    ESP_LOGI(TAG, "PLC/tag data cache task started: full_cache=script-generation-driven compact_period=%u ms",
+             (unsigned)TAG_DATA_CACHE_PERIOD_MS);
 
     TickType_t last_wake = xTaskGetTickCount();
     uint32_t update_count = 0;
 
     for (;;) {
-        size_t build_len = 0;
-        uint32_t point_count = 0;
+        // Build the full /api/plc_data layout/metadata cache before the compact
+        // indexed values whenever the layout changes. This guarantees that the
+        // /api/tag_data layout version and value index order always correspond
+        // to the most recently published /api/plc_data payload.
+        const uint32_t active_generation = script_engine_get_generation();
+        const bool build_full_cache = g_plc_data_cache_force_rebuild ||
+            (!g_plc_data_cache_ready) ||
+            (active_generation != g_plc_data_cache_script_generation);
         uint32_t build_us = 0;
-        int64_t snapshot_us = 0;
 
-        bool ok = plc_data_build_json_into(
-            build_json,
-            PLC_DATA_JSON_CAP,
-            user_tags,
+        if (build_full_cache) {
+            size_t build_len = 0;
+            uint32_t point_count = 0;
+            int64_t snapshot_us = 0;
+            PlcDataBuildTiming timing = {0};
+
+            bool ok = plc_data_build_json_into(
+                build_json,
+                PLC_DATA_JSON_CAP,
+                user_tags,
+                PLC_TAG_MAX_COUNT,
+                &build_len,
+                &point_count,
+                &build_us,
+                &snapshot_us,
+                &timing
+            );
+
+            uint32_t publish_wait_us = 0;
+            uint32_t publish_copy_us = 0;
+            if (ok && build_len > 0 && build_len < PLC_DATA_JSON_CAP) {
+                const int64_t publish_wait_start_us = esp_timer_get_time();
+                if (g_plc_data_cache_mutex && xSemaphoreTake(g_plc_data_cache_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                    publish_wait_us = (uint32_t)(esp_timer_get_time() - publish_wait_start_us);
+                    const int64_t publish_copy_start_us = esp_timer_get_time();
+                    memcpy(g_plc_data_cache_json, build_json, build_len);
+                    g_plc_data_cache_json[build_len] = '\0';
+                    g_plc_data_cache_len = build_len;
+                    g_plc_data_cache_point_count = point_count;
+                    g_plc_data_cache_build_us = build_us;
+                    g_plc_data_cache_snapshot_us = snapshot_us;
+                    g_plc_data_cache_version++;
+                    g_plc_data_cache_script_generation = active_generation;
+                    g_plc_data_cache_force_rebuild = false;
+                    g_plc_data_cache_ready = true;
+                    publish_copy_us = (uint32_t)(esp_timer_get_time() - publish_copy_start_us);
+                    xSemaphoreGive(g_plc_data_cache_mutex);
+                }
+                if (build_us > g_plc_data_cache_build_max_us) g_plc_data_cache_build_max_us = build_us;
+                plc_tags_set_internal_int("PLC_CacheBuildLastUs", clamp_u32_to_i32(build_us));
+                plc_tags_set_internal_int("PLC_CacheBuildMaxUs", clamp_u32_to_i32(g_plc_data_cache_build_max_us));
+                plc_tags_set_internal_int("PLC_CacheIoSnapshotUs", clamp_u32_to_i32(timing.io_snapshot_us));
+                plc_tags_set_internal_int("PLC_CacheScriptNameUs", clamp_u32_to_i32(timing.script_name_us));
+                plc_tags_set_internal_int("PLC_CacheTagCopyUs", clamp_u32_to_i32(timing.tag_copy_us));
+                plc_tags_set_internal_int("PLC_CacheJsonFormatUs", clamp_u32_to_i32(timing.json_format_us));
+                plc_tags_set_internal_int("PLC_CachePublishWaitUs", clamp_u32_to_i32(publish_wait_us));
+                plc_tags_set_internal_int("PLC_CachePublishCopyUs", clamp_u32_to_i32(publish_copy_us));
+                plc_tags_set_internal_int("PLC_CachePointCount", clamp_u32_to_i32(point_count));
+                plc_tags_set_internal_int("PLC_CacheBytes", clamp_u32_to_i32((uint32_t)build_len));
+                plc_tags_set_internal_int("PLC_CacheVersion", clamp_u32_to_i32(g_plc_data_cache_version));
+            } else {
+                ESP_LOGW(TAG, "PLC data cache build failed; cap=%u", (unsigned)PLC_DATA_JSON_CAP);
+            }
+        }
+
+        // Build the compact live-value cache every 100 ms. This is the hot HMI path.
+        size_t tag_build_len = 0;
+        uint32_t tag_point_count = 0;
+        uint32_t tag_build_us = 0;
+        int64_t tag_snapshot_us = 0;
+        TagDataBuildTiming tag_timing = {0};
+        bool tag_ok = tag_data_build_json_into(
+            tag_json,
+            TAG_DATA_JSON_CAP,
+            tag_values,
             PLC_TAG_MAX_COUNT,
-            &build_len,
-            &point_count,
-            &build_us,
-            &snapshot_us
+            &tag_build_len,
+            &tag_point_count,
+            &tag_build_us,
+            &tag_snapshot_us,
+            &tag_timing
         );
 
-        if (ok && build_len > 0 && build_len < PLC_DATA_JSON_CAP) {
-            if (g_plc_data_cache_mutex && xSemaphoreTake(g_plc_data_cache_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                memcpy(g_plc_data_cache_json, build_json, build_len);
-                g_plc_data_cache_json[build_len] = '\0';
-                g_plc_data_cache_len = build_len;
-                g_plc_data_cache_point_count = point_count;
-                g_plc_data_cache_build_us = build_us;
-                g_plc_data_cache_snapshot_us = snapshot_us;
-                g_plc_data_cache_version++;
-                g_plc_data_cache_ready = true;
-                xSemaphoreGive(g_plc_data_cache_mutex);
+        uint32_t tag_publish_wait_us = 0;
+        uint32_t tag_publish_copy_us = 0;
+        if (tag_ok && tag_build_len > 0 && tag_build_len < TAG_DATA_JSON_CAP) {
+            const int64_t publish_wait_start_us = esp_timer_get_time();
+            if (g_tag_data_cache_mutex && xSemaphoreTake(g_tag_data_cache_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                tag_publish_wait_us = (uint32_t)(esp_timer_get_time() - publish_wait_start_us);
+                const int64_t publish_copy_start_us = esp_timer_get_time();
+                memcpy(g_tag_data_cache_json, tag_json, tag_build_len);
+                g_tag_data_cache_json[tag_build_len] = '\0';
+                g_tag_data_cache_len = tag_build_len;
+                g_tag_data_cache_build_us = tag_build_us;
+                g_tag_data_cache_snapshot_us = tag_snapshot_us;
+                g_tag_data_cache_version++;
+                g_tag_data_cache_ready = true;
+                tag_publish_copy_us = (uint32_t)(esp_timer_get_time() - publish_copy_start_us);
+                xSemaphoreGive(g_tag_data_cache_mutex);
             }
+            if (tag_build_us > g_tag_data_cache_build_max_us) g_tag_data_cache_build_max_us = tag_build_us;
+            plc_tags_set_internal_int("PLC_TagDataBuildLastUs", clamp_u32_to_i32(tag_build_us));
+            plc_tags_set_internal_int("PLC_TagDataBuildMaxUs", clamp_u32_to_i32(g_tag_data_cache_build_max_us));
+            plc_tags_set_internal_int("PLC_TagDataTagCopyUs", clamp_u32_to_i32(tag_timing.tag_copy_us));
+            plc_tags_set_internal_int("PLC_TagDataJsonFormatUs", clamp_u32_to_i32(tag_timing.json_format_us));
+            plc_tags_set_internal_int("PLC_TagDataPublishWaitUs", clamp_u32_to_i32(tag_publish_wait_us));
+            plc_tags_set_internal_int("PLC_TagDataPublishCopyUs", clamp_u32_to_i32(tag_publish_copy_us));
+            plc_tags_set_internal_int("PLC_TagDataBytes", clamp_u32_to_i32((uint32_t)tag_build_len));
+            plc_tags_set_internal_int("PLC_TagDataVersion", clamp_u32_to_i32(g_tag_data_cache_version));
         } else {
-            ESP_LOGW(TAG, "PLC data cache build failed; cap=%u", (unsigned)PLC_DATA_JSON_CAP);
+            ESP_LOGW(TAG, "Compact tag data cache build failed; cap=%u", (unsigned)TAG_DATA_JSON_CAP);
         }
 
         update_count++;
@@ -971,14 +1271,14 @@ static void plc_data_cache_task(void *arg)
                      (unsigned long)g_plc_data_cache_len,
                      (unsigned long)g_plc_data_cache_build_us);
         } else if ((update_count % 1000u) == 0u) {
-            ESP_LOGI(TAG, "PLC data cache: version=%lu points=%lu bytes=%lu build_us=%lu",
+            ESP_LOGI(TAG, "Tag data cache: tag_version=%lu bytes=%lu build_us=%lu full_version=%lu full_build_us=%lu",
+                     (unsigned long)g_tag_data_cache_version,
+                     (unsigned long)g_tag_data_cache_len,
+                     (unsigned long)g_tag_data_cache_build_us,
                      (unsigned long)g_plc_data_cache_version,
-                     (unsigned long)g_plc_data_cache_point_count,
-                     (unsigned long)g_plc_data_cache_len,
                      (unsigned long)g_plc_data_cache_build_us);
         }
-
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(PLC_DATA_CACHE_PERIOD_MS));
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(TAG_DATA_CACHE_PERIOD_MS));
     }
 }
 
@@ -1016,11 +1316,58 @@ static esp_err_t plc_data_get_handler(httpd_req_t *req)
     // Keep the mutex while sending so the cache task cannot overwrite the
     // buffer mid-transfer. This only blocks the low-priority cache task, not
     // the PLC scan or script task.
+    const int64_t send_start_us = esp_timer_get_time();
     esp_err_t ret = httpd_resp_send(req, g_plc_data_cache_json, len);
+    const uint32_t send_us = (uint32_t)(esp_timer_get_time() - send_start_us);
     xSemaphoreGive(g_plc_data_cache_mutex);
+    if (send_us > g_http_plc_data_send_max_us) g_http_plc_data_send_max_us = send_us;
+    plc_tags_set_internal_int("PLC_HttpPlcDataSendLastUs", clamp_u32_to_i32(send_us));
+    plc_tags_set_internal_int("PLC_HttpPlcDataSendMaxUs", clamp_u32_to_i32(g_http_plc_data_send_max_us));
     return ret;
 }
 
+
+static esp_err_t tag_data_get_handler(httpd_req_t *req)
+{
+    if (!g_tag_data_cache_mutex || !g_tag_data_cache_json) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_sendstr(req, "Tag data cache not initialized");
+        return ESP_OK;
+    }
+
+    if (xSemaphoreTake(g_tag_data_cache_mutex, pdMS_TO_TICKS(10)) != pdTRUE) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_sendstr(req, "Tag data cache busy");
+        return ESP_OK;
+    }
+
+    const bool ready = g_tag_data_cache_ready;
+    const size_t len = g_tag_data_cache_len;
+
+    if (!ready || len == 0) {
+        xSemaphoreGive(g_tag_data_cache_mutex);
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain");
+        httpd_resp_sendstr(req, "Tag data cache warming up");
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-PLC-Data-Source", "tag-data-cache");
+
+    const int64_t send_start_us = esp_timer_get_time();
+    esp_err_t ret = httpd_resp_send(req, g_tag_data_cache_json, len);
+    const uint32_t send_us = (uint32_t)(esp_timer_get_time() - send_start_us);
+    xSemaphoreGive(g_tag_data_cache_mutex);
+
+    if (send_us > g_http_tag_data_send_max_us) g_http_tag_data_send_max_us = send_us;
+    plc_tags_set_internal_int("PLC_HttpTagDataSendLastUs", clamp_u32_to_i32(send_us));
+    plc_tags_set_internal_int("PLC_HttpTagDataSendMaxUs", clamp_u32_to_i32(g_http_tag_data_send_max_us));
+    return ret;
+}
 
 #define LITTLEFS_MOUNT_POINT       "/littlefs"
 #define FILE_API_PATH_MAX          192
@@ -1445,6 +1792,8 @@ static esp_err_t api_tags_post_handler(httpd_req_t *req)
         httpd_resp_send(req, err, HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
+
+    plc_data_cache_request_full_rebuild("tag registry updated");
 
     char json[320];
     snprintf(json, sizeof(json),
@@ -2385,14 +2734,23 @@ config.uri_match_fn = httpd_uri_match_wildcard;
     if (!g_plc_data_cache_mutex) {
         g_plc_data_cache_mutex = xSemaphoreCreateMutex();
     }
+    if (!g_tag_data_cache_mutex) {
+        g_tag_data_cache_mutex = xSemaphoreCreateMutex();
+    }
     if (!g_plc_data_cache_json) {
         g_plc_data_cache_json = (char*)heap_caps_malloc(PLC_DATA_JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!g_plc_data_cache_json) {
             g_plc_data_cache_json = (char*)heap_caps_malloc(PLC_DATA_JSON_CAP, MALLOC_CAP_8BIT);
         }
     }
-    if (!g_plc_data_cache_mutex || !g_plc_data_cache_json) {
-        ESP_LOGE(TAG, "PLC data cache init failed");
+    if (!g_tag_data_cache_json) {
+        g_tag_data_cache_json = (char*)heap_caps_malloc(TAG_DATA_JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!g_tag_data_cache_json) {
+            g_tag_data_cache_json = (char*)heap_caps_malloc(TAG_DATA_JSON_CAP, MALLOC_CAP_8BIT);
+        }
+    }
+    if (!g_plc_data_cache_mutex || !g_plc_data_cache_json || !g_tag_data_cache_mutex || !g_tag_data_cache_json) {
+        ESP_LOGE(TAG, "PLC/tag data cache init failed");
     } else if (!g_plc_data_cache_task) {
         BaseType_t task_ok = xTaskCreatePinnedToCore(
             plc_data_cache_task,
@@ -2564,6 +2922,14 @@ httpd_uri_t large_status_uri = {
         .user_ctx = NULL
     };
     register_uri_checked(g_http_server, &plc_data_uri);
+
+    httpd_uri_t tag_data_uri = {
+        .uri = "/api/tag_data",
+        .method = HTTP_GET,
+        .handler = tag_data_get_handler,
+        .user_ctx = NULL
+    };
+    register_uri_checked(g_http_server, &tag_data_uri);
 
     httpd_uri_t api_tags_get_uri = {
         .uri = "/api/tags",

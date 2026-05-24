@@ -283,6 +283,21 @@ static TaskHandle_t g_plc_task_handle = nullptr;
 static TaskHandle_t g_script_task_handle = nullptr;
 static gptimer_handle_t g_plc_timer = nullptr;
 
+static uint32_t g_io_task_work_max_us = 0;
+static uint32_t g_io_task_period_max_us = 0;
+static uint32_t g_as_task_total_max_us = 0;
+static uint32_t g_as_task_period_max_us = 0;
+
+static int32_t clamp_u32_to_i32(uint32_t v)
+{
+    return v > (uint32_t)INT32_MAX ? INT32_MAX : (int32_t)v;
+}
+
+static int32_t clamp_u64_to_i32(uint64_t v)
+{
+    return v > (uint64_t)INT32_MAX ? INT32_MAX : (int32_t)v;
+}
+
 static bool IRAM_ATTR plc_timer_alarm_callback(
     gptimer_handle_t timer,
     const gptimer_alarm_event_data_t* edata,
@@ -359,6 +374,22 @@ static void plc_scan_task(void* arg)
         const int64_t work_end_us = esp_timer_get_time();
 
         const int64_t work_us = work_end_us - work_start_us;
+        const uint32_t work_us_u32 = work_us > 0 ? (uint32_t)work_us : 0;
+        if (work_us_u32 > g_io_task_work_max_us) g_io_task_work_max_us = work_us_u32;
+
+        uint32_t period_us_u32 = 0;
+        if (!first_sample) {
+            const int64_t period_tmp_us = now_us - last_time_us;
+            period_us_u32 = period_tmp_us > 0 ? (uint32_t)period_tmp_us : 0;
+            if (period_us_u32 > g_io_task_period_max_us) g_io_task_period_max_us = period_us_u32;
+        }
+
+        plc_tags_set_internal_int("PLC_IoTaskWorkLastUs", clamp_u32_to_i32(work_us_u32));
+        plc_tags_set_internal_int("PLC_IoTaskWorkMaxUs", clamp_u32_to_i32(g_io_task_work_max_us));
+        if (period_us_u32) {
+            plc_tags_set_internal_int("PLC_IoTaskPeriodLastUs", clamp_u32_to_i32(period_us_u32));
+            plc_tags_set_internal_int("PLC_IoTaskPeriodMaxUs", clamp_u32_to_i32(g_io_task_period_max_us));
+        }
 
         taskENTER_CRITICAL(&g_stats_lock);
 
@@ -378,7 +409,10 @@ static void plc_scan_task(void* arg)
             first_sample = false;
         }
 
+        const uint64_t missed_total_snapshot = g_active_stats.missed_notifications;
         taskEXIT_CRITICAL(&g_stats_lock);
+
+        plc_tags_set_internal_int("PLC_IoTaskMissedCount", clamp_u64_to_i32(missed_total_snapshot));
 
         last_time_us = now_us;
     }
@@ -428,6 +462,8 @@ static void script_scan_task(void* arg)
         const bool ran = can_run ? script_engine_run_scan() : false;
         const int64_t total_us_i64 = esp_timer_get_time() - start_us;
         const uint32_t total_us = total_us_i64 > 0 ? (uint32_t)total_us_i64 : 0;
+        if (total_us > g_as_task_total_max_us) g_as_task_total_max_us = total_us;
+        if (actual_period_us > g_as_task_period_max_us) g_as_task_period_max_us = actual_period_us;
 
         uint32_t drained = 0;
         if (total_us > policy.script_budget_us || notify_count > 1) {
@@ -484,6 +520,16 @@ static void script_scan_task(void* arg)
             ESP_LOGE(TAG, "PLC scan fault set by overrun policy");
         }
 
+        plc_tags_set_internal_int("PLC_AsTaskTotalLastUs", clamp_u32_to_i32(total_us));
+        plc_tags_set_internal_int("PLC_AsTaskTotalMaxUs", clamp_u32_to_i32(g_as_task_total_max_us));
+        plc_tags_set_internal_int("PLC_AsTaskPeriodLastUs", clamp_u32_to_i32(actual_period_us));
+        plc_tags_set_internal_int("PLC_AsTaskPeriodMaxUs", clamp_u32_to_i32(g_as_task_period_max_us));
+        plc_tags_set_internal_int("PLC_AsTaskCoalescedLast", clamp_u32_to_i32(coalesced));
+        plc_tags_set_internal_int("PLC_AsVmLastUs", clamp_u32_to_i32(script_engine_get_vm_last_us()));
+        plc_tags_set_internal_int("PLC_AsVmMaxUs", clamp_u32_to_i32(script_engine_get_vm_max_us()));
+        plc_tags_set_internal_int("PLC_AsVmEmaUs", clamp_u32_to_i32(script_engine_get_vm_ema_us()));
+        plc_tags_set_internal_int("PLC_AsVmWindowAvgUs", clamp_u32_to_i32(script_engine_get_vm_window_avg_us()));
+        plc_tags_set_internal_int("PLC_AsVmWindowMaxUs", clamp_u32_to_i32(script_engine_get_vm_window_max_us()));
         plc_tags_set_internal_int("PLC_ScanCoalescedCount", (int32_t)(g_total_coalesced_scans > INT32_MAX ? INT32_MAX : g_total_coalesced_scans));
         plc_tags_set_internal_int("PLC_ScanOverrunCount", (int32_t)(g_total_overrun_scans > INT32_MAX ? INT32_MAX : g_total_overrun_scans));
         plc_tags_set_internal_bool("PLC_ScanOverrunActive", overrun || coalesced > 0);

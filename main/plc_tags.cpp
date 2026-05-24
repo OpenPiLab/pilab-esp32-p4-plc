@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -37,7 +38,29 @@ struct RuntimeTag {
         int32_t i;
         float f;
     } value;
+    // Registry/default value used by /api/tags and flash saves. This is
+    // intentionally separate from the live runtime value so HMI writes do not
+    // silently change the user's intended startup/initial value.
+    union {
+        bool b;
+        int32_t i;
+        float f;
+    } initial_value;
 };
+
+static void tag_copy_current_to_initial(RuntimeTag& t)
+{
+    if (t.type == PLC_TAG_BOOL) t.initial_value.b = t.value.b;
+    else if (t.type == PLC_TAG_INT) t.initial_value.i = t.value.i;
+    else t.initial_value.f = t.value.f;
+}
+
+static void tag_copy_initial_to_current(RuntimeTag& t)
+{
+    if (t.type == PLC_TAG_BOOL) t.value.b = t.initial_value.b;
+    else if (t.type == PLC_TAG_INT) t.value.i = t.initial_value.i;
+    else t.value.f = t.initial_value.f;
+}
 
 static RuntimeTag g_tags[PLC_TAG_MAX_COUNT];
 static size_t g_tag_count = 0;
@@ -240,6 +263,7 @@ static void add_bool_tag_nolock(const char* name, bool value, const char* desc)
     t.script_visible = true;
     snprintf(t.description, sizeof(t.description), "%.*s", (int)(PLC_TAG_DESC_MAX - 1), desc ? desc : "");
     t.value.b = value;
+    t.initial_value.b = value;
 }
 
 
@@ -257,6 +281,7 @@ static void add_int_tag_nolock(const char* name, int32_t value, const char* unit
     snprintf(t.description, sizeof(t.description), "%.*s", (int)(PLC_TAG_DESC_MAX - 1), desc ? desc : "");
     snprintf(t.units, sizeof(t.units), "%.*s", (int)(sizeof(t.units) - 1), units ? units : "");
     t.value.i = value;
+    t.initial_value.i = value;
 }
 
 static void add_float_tag_nolock(const char* name, float value, const char* units, const char* desc, bool writable, bool retentive, bool hmi_visible, bool script_visible)
@@ -273,6 +298,7 @@ static void add_float_tag_nolock(const char* name, float value, const char* unit
     snprintf(t.description, sizeof(t.description), "%.*s", (int)(PLC_TAG_DESC_MAX - 1), desc ? desc : "");
     snprintf(t.units, sizeof(t.units), "%.*s", (int)(sizeof(t.units) - 1), units ? units : "");
     t.value.f = value;
+    t.initial_value.f = value;
 }
 
 static void ensure_runtime_diagnostic_tags_nolock()
@@ -293,6 +319,57 @@ static void ensure_runtime_diagnostic_tags_nolock()
     idx = find_tag_index_nolock("PLC_ScanFaultActive"); if (idx >= 0) { g_tags[idx].writable = false; g_tags[idx].retentive = false; g_tags[idx].script_visible = true; }
     add_int_tag_nolock("PLC_ScanExecutionTimeUs", 0, "us", "System: last script scan execution time", false, false, true, true);
     add_float_tag_nolock("PLC_ScanLoadPercent", 0.0f, "%", "System: script execution time divided by budget", false, false, true, true);
+
+    // Fine-grained PLC task timing diagnostics. These are firmware-owned tags
+    // intended for HMI trend/debug views when chasing jitter or cache stalls.
+    add_int_tag_nolock("PLC_IoTaskWorkLastUs", 0, "us", "System: last 1 ms PLC I/O task work duration", false, false, true, true);
+    add_int_tag_nolock("PLC_IoTaskWorkMaxUs", 0, "us", "System: max 1 ms PLC I/O task work duration since boot", false, false, true, true);
+    add_int_tag_nolock("PLC_IoTaskPeriodLastUs", 0, "us", "System: last 1 ms PLC I/O task period", false, false, true, true);
+    add_int_tag_nolock("PLC_IoTaskPeriodMaxUs", 0, "us", "System: max 1 ms PLC I/O task period since boot", false, false, true, true);
+    add_int_tag_nolock("PLC_IoTaskMissedCount", 0, "ticks", "System: accumulated missed 1 ms PLC timer notifications", false, false, true, true);
+
+    add_int_tag_nolock("PLC_AsTaskTotalLastUs", 0, "us", "System: last AngelScript task total duration", false, false, true, true);
+    add_int_tag_nolock("PLC_AsTaskTotalMaxUs", 0, "us", "System: max AngelScript task total duration since boot", false, false, true, true);
+    add_int_tag_nolock("PLC_AsTaskPeriodLastUs", 0, "us", "System: last AngelScript task period", false, false, true, true);
+    add_int_tag_nolock("PLC_AsTaskPeriodMaxUs", 0, "us", "System: max AngelScript task period since boot", false, false, true, true);
+    add_int_tag_nolock("PLC_AsTaskCoalescedLast", 0, "scans", "System: script notifications coalesced on last scan", false, false, true, true);
+
+    add_int_tag_nolock("PLC_AsVmLastUs", 0, "us", "System: last AngelScript VM ctx->Execute duration", false, false, true, true);
+    add_int_tag_nolock("PLC_AsVmMaxUs", 0, "us", "System: max AngelScript VM ctx->Execute duration since boot", false, false, true, true);
+    add_int_tag_nolock("PLC_AsVmEmaUs", 0, "us", "System: AngelScript VM execution exponential moving average", false, false, true, true);
+    add_int_tag_nolock("PLC_AsVmWindowAvgUs", 0, "us", "System: AngelScript VM 1 second window average", false, false, true, true);
+    add_int_tag_nolock("PLC_AsVmWindowMaxUs", 0, "us", "System: AngelScript VM 1 second window maximum", false, false, true, true);
+
+    add_int_tag_nolock("PLC_CacheBuildLastUs", 0, "us", "System: last /api/plc_data cache build total duration", false, false, true, true);
+    add_int_tag_nolock("PLC_CacheBuildMaxUs", 0, "us", "System: max /api/plc_data cache build duration since boot", false, false, true, true);
+    add_int_tag_nolock("PLC_CacheIoSnapshotUs", 0, "us", "System: cache build I/O snapshot duration", false, false, true, true);
+    add_int_tag_nolock("PLC_CacheScriptNameUs", 0, "us", "System: cache build active script name lookup duration", false, false, true, true);
+    add_int_tag_nolock("PLC_CacheTagCopyUs", 0, "us", "System: cache build tag table copy duration", false, false, true, true);
+    add_int_tag_nolock("PLC_CacheJsonFormatUs", 0, "us", "System: cache build JSON formatting duration", false, false, true, true);
+    add_int_tag_nolock("PLC_CachePublishWaitUs", 0, "us", "System: cache task wait time for cache mutex", false, false, true, true);
+    add_int_tag_nolock("PLC_CachePublishCopyUs", 0, "us", "System: cache task cache-buffer copy/publish duration", false, false, true, true);
+    add_int_tag_nolock("PLC_CachePointCount", 0, "points", "System: cached PLC data point count", false, false, true, true);
+    add_int_tag_nolock("PLC_CacheBytes", 0, "bytes", "System: cached PLC data JSON byte count", false, false, true, true);
+    add_int_tag_nolock("PLC_CacheVersion", 0, "builds", "System: cached PLC data build version", false, false, true, true);
+
+    add_int_tag_nolock("PLC_HttpPlcDataSendLastUs", 0, "us", "System: last /api/plc_data HTTP send duration", false, false, true, true);
+    add_int_tag_nolock("PLC_HttpPlcDataSendMaxUs", 0, "us", "System: max /api/plc_data HTTP send duration since boot", false, false, true, true);
+
+    add_int_tag_nolock("PLC_TagDataBuildLastUs", 0, "us", "System: last compact /api/tag_data build duration", false, false, true, true);
+    add_int_tag_nolock("PLC_TagDataBuildMaxUs", 0, "us", "System: max compact /api/tag_data build duration since boot", false, false, true, true);
+    add_int_tag_nolock("PLC_TagDataTagCopyUs", 0, "us", "System: compact tag-data value copy duration", false, false, true, true);
+    add_int_tag_nolock("PLC_TagDataJsonFormatUs", 0, "us", "System: compact tag-data JSON formatting duration", false, false, true, true);
+    add_int_tag_nolock("PLC_TagDataPublishWaitUs", 0, "us", "System: compact tag-data cache publish wait duration", false, false, true, true);
+    add_int_tag_nolock("PLC_TagDataPublishCopyUs", 0, "us", "System: compact tag-data cache publish copy duration", false, false, true, true);
+    add_int_tag_nolock("PLC_TagDataBytes", 0, "bytes", "System: compact tag-data JSON byte count", false, false, true, true);
+    add_int_tag_nolock("PLC_TagDataVersion", 0, "builds", "System: compact tag-data build version", false, false, true, true);
+    add_int_tag_nolock("PLC_HttpTagDataSendLastUs", 0, "us", "System: last /api/tag_data HTTP send duration", false, false, true, true);
+    add_int_tag_nolock("PLC_HttpTagDataSendMaxUs", 0, "us", "System: max /api/tag_data HTTP send duration since boot", false, false, true, true);
+
+    add_int_tag_nolock("PLC_CompileLastUs", 0, "us", "System: last AngelScript compile duration", false, false, true, true);
+    add_int_tag_nolock("PLC_CompileMaxUs", 0, "us", "System: max AngelScript compile duration since boot", false, false, true, true);
+    add_int_tag_nolock("PLC_CleanupDestroyLastUs", 0, "us", "System: last retired script cleanup destroy duration", false, false, true, true);
+    add_int_tag_nolock("PLC_CleanupDestroyMaxUs", 0, "us", "System: max retired script cleanup destroy duration since boot", false, false, true, true);
 
     // Direct script globals registered in script_engine.cpp.
     add_int_tag_nolock("PLC_DeltaTimeUs", 5000, "us", "System: clamped elapsed time passed to script", false, false, true, false);
@@ -320,6 +397,7 @@ static void add_default_tags_nolock()
         t.type = PLC_TAG_BOOL; t.writable = true; t.retentive = true; t.hmi_visible = true; t.script_visible = true;
         snprintf(t.description, sizeof(t.description), "%s", desc);
         t.value.b = value;
+        t.initial_value.b = value;
     };
     auto add_float = [](const char* name, float value, const char* units, const char* desc) {
         if (g_tag_count >= PLC_TAG_MAX_COUNT) return;
@@ -331,6 +409,7 @@ static void add_default_tags_nolock()
         snprintf(t.units, sizeof(t.units), "%s", units);
         snprintf(t.description, sizeof(t.description), "%s", desc);
         t.value.f = value;
+        t.initial_value.f = value;
     };
     // Default release/demo tags used by the Vue HMI starter screen.
     // These are writable user tags, not physical input pins. The default
@@ -425,9 +504,16 @@ void plc_tags_get_json(char* out, size_t out_len)
         json_escape_append(p, rem, t.description);
         n = snprintf(p, rem, "\",\"units\":\""); p += n; rem = (n < (int)rem) ? rem - n : 0;
         json_escape_append(p, rem, t.units);
-        if (t.type == PLC_TAG_BOOL) n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%s}", (double)t.min_value, (double)t.max_value, t.value.b?"true":"false");
-        else if (t.type == PLC_TAG_INT) n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%ld}", (double)t.min_value, (double)t.max_value, (long)t.value.i);
-        else n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%.6g}", (double)t.min_value, (double)t.max_value, (double)t.value.f);
+        if (t.type == PLC_TAG_BOOL) {
+            const bool out_value = system ? t.value.b : t.initial_value.b;
+            n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%s}", (double)t.min_value, (double)t.max_value, out_value ? "true" : "false");
+        } else if (t.type == PLC_TAG_INT) {
+            const int32_t out_value = system ? t.value.i : t.initial_value.i;
+            n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%ld}", (double)t.min_value, (double)t.max_value, (long)out_value);
+        } else {
+            const float out_value = system ? t.value.f : t.initial_value.f;
+            n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%.6g}", (double)t.min_value, (double)t.max_value, (double)out_value);
+        }
         p += n; rem = (n < (int)rem) ? rem - n : 0;
         first = false;
     }
@@ -470,13 +556,13 @@ static bool write_runtime_tag_object_json(char*& p, size_t& rem, const RuntimeTa
     json_escape_append(p, rem, t.units);
     if (t.type == PLC_TAG_BOOL) {
         n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%s}",
-                     (double)t.min_value, (double)t.max_value, t.value.b ? "true" : "false");
+                     (double)t.min_value, (double)t.max_value, t.initial_value.b ? "true" : "false");
     } else if (t.type == PLC_TAG_INT) {
         n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%ld}",
-                     (double)t.min_value, (double)t.max_value, (long)t.value.i);
+                     (double)t.min_value, (double)t.max_value, (long)t.initial_value.i);
     } else {
         n = snprintf(p, rem, "\",\"min\":%.3f,\"max\":%.3f,\"value\":%.6g}",
-                     (double)t.min_value, (double)t.max_value, (double)t.value.f);
+                     (double)t.min_value, (double)t.max_value, (double)t.initial_value.f);
     }
     if (n < 0 || (size_t)n >= rem) return false;
     p += n; rem -= (size_t)n;
@@ -622,11 +708,12 @@ static void update_existing_tag_from_upload_nolock(RuntimeTag& dst, const Runtim
     dst.min_value = src.min_value;
     dst.max_value = src.max_value;
 
-    // A full tag upload is allowed to update the current value too. The active
-    // script is paused by plc_tags_load_json_internal() while this happens.
-    if (dst.type == PLC_TAG_BOOL) dst.value.b = src.value.b;
-    else if (dst.type == PLC_TAG_INT) dst.value.i = src.value.i;
-    else dst.value.f = src.value.f;
+    // A full tag upload intentionally updates both the saved initial value and
+    // the current live value. Passive /api/tags refreshes do not do this; they
+    // only read initial_value.
+    if (dst.type == PLC_TAG_BOOL) { dst.initial_value.b = src.initial_value.b; dst.value.b = src.value.b; }
+    else if (dst.type == PLC_TAG_INT) { dst.initial_value.i = src.initial_value.i; dst.value.i = src.value.i; }
+    else { dst.initial_value.f = src.initial_value.f; dst.value.f = src.value.f; }
 }
 
 static bool append_uploaded_tag_nolock(const RuntimeTag& src, char* err, size_t err_len)
@@ -720,6 +807,7 @@ static bool plc_tags_load_json_internal(const char* json, bool save_file, char* 
         if (type == PLC_TAG_BOOL) t.value.b = find_bool_field(obj, "value", false);
         else if (type == PLC_TAG_INT) t.value.i = (int32_t)find_float_field(obj, "value", 0.0f);
         else t.value.f = find_float_field(obj, "value", 0.0f);
+        tag_copy_current_to_initial(t);
     }
 
     // First validate against the live table without mutating it. A live tag's
@@ -844,6 +932,48 @@ size_t plc_tags_copy_all(PlcTagInfo* out, size_t max_count)
     xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
     size_t n = (g_tag_count < max_count) ? g_tag_count : max_count;
     for (size_t i = 0; i < n; ++i) tag_to_info(g_tags[i], &out[i]);
+    xSemaphoreGive(g_tags_mutex);
+    return n;
+}
+
+size_t plc_tags_copy_hmi_values(PlcTagValueInfo* out, size_t max_count)
+{
+    if (!out || !max_count) return 0;
+    if (!g_tags_mutex) plc_tags_init();
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    size_t n = 0;
+    for (size_t i = 0; i < g_tag_count && n < max_count; ++i) {
+        const RuntimeTag& t = g_tags[i];
+        if (!t.hmi_visible) continue;
+        PlcTagValueInfo& v = out[n++];
+        memset(&v, 0, sizeof(v));
+        memcpy(v.name, t.name, sizeof(v.name));
+        v.name[sizeof(v.name) - 1] = '\0';
+        v.type = t.type;
+        v.writable = t.writable;
+        if (t.type == PLC_TAG_BOOL) v.value.b = t.value.b;
+        else if (t.type == PLC_TAG_INT) v.value.i = t.value.i;
+        else v.value.f = t.value.f;
+    }
+    xSemaphoreGive(g_tags_mutex);
+    return n;
+}
+
+size_t plc_tags_copy_hmi_indexed_values(PlcTagIndexedValueInfo* out, size_t max_count)
+{
+    if (!out || !max_count) return 0;
+    if (!g_tags_mutex) plc_tags_init();
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    size_t n = 0;
+    for (size_t i = 0; i < g_tag_count && n < max_count; ++i) {
+        const RuntimeTag& t = g_tags[i];
+        if (!t.hmi_visible) continue;
+        PlcTagIndexedValueInfo& v = out[n++];
+        v.type = t.type;
+        if (t.type == PLC_TAG_BOOL) v.value.b = t.value.b;
+        else if (t.type == PLC_TAG_INT) v.value.i = t.value.i;
+        else v.value.f = t.value.f;
+    }
     xSemaphoreGive(g_tags_mutex);
     return n;
 }
@@ -1118,6 +1248,7 @@ bool plc_tags_ensure_param_tag(const char* name, const char* type_name, const ch
         }
         t.value.f = v;
     }
+    tag_copy_current_to_initial(t);
 
     xSemaphoreGive(g_tags_mutex);
     set_err(err, err_len, "OK");
@@ -1175,6 +1306,7 @@ bool plc_tags_ensure_monitor_tag(const char* name, const char* type_name, const 
     if (type == PLC_TAG_BOOL) t.value.b = false;
     else if (type == PLC_TAG_INT) t.value.i = 0;
     else t.value.f = 0.0f;
+    tag_copy_current_to_initial(t);
     xSemaphoreGive(g_tags_mutex);
     set_err(err, err_len, "OK");
     return true;

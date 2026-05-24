@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -248,6 +249,7 @@ static TaskHandle_t g_cleanup_task_handle = nullptr;
 static std::atomic<uint32_t> g_generation{0};
 static std::atomic<int> g_state{SCRIPT_STATE_IDLE};
 static std::atomic<uint64_t> g_last_compile_us{0};
+static std::atomic<uint64_t> g_max_compile_us{0};
 static std::atomic<uint32_t> g_last_heap_before{0};
 static std::atomic<uint32_t> g_last_heap_after{0};
 static std::atomic<uint32_t> g_last_heap_min{0};
@@ -266,6 +268,7 @@ static std::atomic<bool> g_compile_busy{false};
 static std::atomic<uint32_t> g_activations{0};
 static std::atomic<uint32_t> g_script_scans_completed{0};
 static std::atomic<uint32_t> g_compile_execute_overlap_scans{0};
+static std::atomic<uint32_t> g_retired_destroy_us_last{0};
 static std::atomic<uint32_t> g_retired_destroy_us_max{0};
 static std::atomic<uint32_t> g_run_scan_us_max{0};
 static std::atomic<uint32_t> g_run_scan_us_last{0};
@@ -284,6 +287,16 @@ static uint32_t g_run_scan_window_min = UINT32_MAX;
 static int64_t g_run_scan_window_start_us = 0;
 static uint32_t g_run_scan_window_over_2500 = 0;
 static uint32_t g_run_scan_window_over_5000 = 0;
+
+static int32_t clamp_u32_to_i32(uint32_t v)
+{
+    return v > (uint32_t)INT32_MAX ? INT32_MAX : (int32_t)v;
+}
+
+static int32_t clamp_u64_to_i32(uint64_t v)
+{
+    return v > (uint64_t)INT32_MAX ? INT32_MAX : (int32_t)v;
+}
 
 // Experiment: pause active script execution while the compiler is building a
 // replacement program. The 1 ms I/O task still runs and applies the most recent
@@ -652,6 +665,12 @@ static bool compile_to_pending(const char* script_text, size_t script_len, char*
     const uint32_t psram_min = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
     g_last_compile_us.store(compile_us);
+    uint64_t prev_compile_max = g_max_compile_us.load(std::memory_order_relaxed);
+    while (compile_us > prev_compile_max &&
+           !g_max_compile_us.compare_exchange_weak(prev_compile_max, compile_us, std::memory_order_relaxed)) {
+    }
+    plc_tags_set_internal_int("PLC_CompileLastUs", clamp_u64_to_i32(compile_us));
+    plc_tags_set_internal_int("PLC_CompileMaxUs", clamp_u64_to_i32(g_max_compile_us.load(std::memory_order_relaxed)));
     g_last_heap_before.store(heap_before);
     g_last_heap_after.store(heap_after_compile);
     g_last_heap_min.store(heap_min);
@@ -751,7 +770,10 @@ static void script_cleanup_task(void*)
             const int64_t destroy_start = esp_timer_get_time();
             delete job.program;
             const uint32_t destroy_us = (uint32_t)(esp_timer_get_time() - destroy_start);
+            g_retired_destroy_us_last.store(destroy_us);
             atomic_max_u32(g_retired_destroy_us_max, destroy_us);
+            plc_tags_set_internal_int("PLC_CleanupDestroyLastUs", clamp_u32_to_i32(destroy_us));
+            plc_tags_set_internal_int("PLC_CleanupDestroyMaxUs", clamp_u32_to_i32(g_retired_destroy_us_max.load()));
 
             ESP_LOGI(TAG,
                      "Cleanup task destroyed retired script generation=%lu in %lu us on core %d",
@@ -1162,6 +1184,31 @@ bool script_engine_run_scan(void)
     }
 
     return ran;
+}
+
+extern "C" uint32_t script_engine_get_vm_last_us(void)
+{
+    return g_run_scan_us_last.load(std::memory_order_relaxed);
+}
+
+extern "C" uint32_t script_engine_get_vm_max_us(void)
+{
+    return g_run_scan_us_max.load(std::memory_order_relaxed);
+}
+
+extern "C" uint32_t script_engine_get_vm_ema_us(void)
+{
+    return g_run_scan_us_ema.load(std::memory_order_relaxed);
+}
+
+extern "C" uint32_t script_engine_get_vm_window_avg_us(void)
+{
+    return g_run_scan_us_window_avg.load(std::memory_order_relaxed);
+}
+
+extern "C" uint32_t script_engine_get_vm_window_max_us(void)
+{
+    return g_run_scan_us_window_max.load(std::memory_order_relaxed);
 }
 
 void script_engine_get_active_script_name(char* out, size_t out_len)

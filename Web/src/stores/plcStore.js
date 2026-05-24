@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue';
-import { getCommandCenter, getPlcData, setPlcMode, writePlcTag } from '../api/plcApi';
+import { getCommandCenter, getPlcData, getTagData, setPlcMode, writePlcTag } from '../api/plcApi';
+import { ensureTagStoreLoaded } from './tagStore';
 
 // Lightweight singleton store. No Pinia dependency, no duplicate pollers.
 const overview = ref({});
@@ -22,6 +23,9 @@ let commandInflight = null;
 let dataInflight = null;
 let dataUsers = 0;
 let started = false;
+let fullPlcDataLoaded = false;
+let layoutVersion = 0;
+let layoutPointNames = [];
 
 const stateName = (s) => typeof s === 'string' ? s : (['IDLE','QUEUED','COMPILING','OK','FAILED','QUEUE_FULL'][s] || s || 'UNKNOWN');
 
@@ -80,26 +84,159 @@ async function refreshCommandCenter() {
   return commandInflight;
 }
 
+function ingestFullPlcData(data) {
+  const map = {};
+  const names = [];
+  const order = [];
+  for (const p of data.points || []) {
+    if (!p?.name) continue;
+    map[p.name] = p;
+    names.push(p.name);
+    order.push(p.name);
+  }
+  plcData.value = data;
+  pointsByName.value = map;
+  tagNames.value = names.sort();
+  layoutPointNames = order;
+  layoutVersion = Number(data.cache_version ?? data.version ?? data.layout_version ?? layoutVersion ?? 0);
+  fullPlcDataLoaded = true;
+  return data;
+}
+
+function normalizeCompactTagData(data = {}) {
+  const points = [];
+  const indexedValues = Array.isArray(data.values) ? data.values : (Array.isArray(data.a) ? data.a : null);
+  const indexed = !!(data.indexed ?? data.i);
+  const pointCount = Number(data.point_count ?? data.pc ?? (indexedValues ? indexedValues.length : 0));
+
+  if (indexed && indexedValues && layoutPointNames.length) {
+    if (indexedValues.length !== layoutPointNames.length || pointCount !== layoutPointNames.length) {
+      return {
+        ...data,
+        indexed,
+        layout_version: Number(data.layout_version ?? data.layout ?? data.l ?? 0),
+        value_version: Number(data.value_version ?? data.v ?? 0),
+        point_count: pointCount,
+        points: [],
+        layout_mismatch: true,
+      };
+    }
+    for (let i = 0; i < indexedValues.length; i++) {
+      points.push({
+        name: layoutPointNames[i],
+        value: indexedValues[i],
+      });
+    }
+  } else {
+    const rawPoints = data.points || data.p || data.t || [];
+    for (const p of rawPoints) {
+      const name = p?.name ?? p?.n;
+      if (!name) continue;
+      points.push({
+        name,
+        value: p?.value ?? p?.v,
+      });
+    }
+  }
+
+  return {
+    ...data,
+    indexed,
+    layout_version: Number(data.layout_version ?? data.layout ?? data.l ?? 0),
+    value_version: Number(data.value_version ?? data.v ?? 0),
+    snapshot_us: data.snapshot_us ?? data.ts,
+    tick_count: data.tick_count ?? data.tc,
+    script_scan_count: data.script_scan_count ?? data.ssc,
+    output_write_count: data.output_write_count ?? data.owc,
+    raw_di_mask: data.raw_di_mask ?? data.rim,
+    di_mask: data.di_mask ?? data.dim,
+    do_mask: data.do_mask ?? data.dom,
+    point_count: data.point_count ?? data.pc ?? points.length,
+    build_us: data.build_us ?? data.bu,
+    points,
+  };
+}
+
+function ingestCompactTagData(data) {
+  const normalized = normalizeCompactTagData(data);
+  const existing = pointsByName.value || {};
+  const map = { ...existing };
+  const namesSet = new Set(tagNames.value || []);
+
+  for (const p of normalized.points || []) {
+    const prev = map[p.name] || { name: p.name };
+    map[p.name] = { ...prev, value: p.value };
+    namesSet.add(p.name);
+  }
+
+  pointsByName.value = map;
+  tagNames.value = Array.from(namesSet).sort();
+  plcData.value = {
+    ...plcData.value,
+    ...normalized,
+    // Preserve full metadata shape while replacing the live point values.
+    points: tagNames.value.map((name) => map[name]).filter(Boolean),
+  };
+  return plcData.value;
+}
+
+async function refreshFullPlcData() {
+  const data = await getPlcData();
+  const previousLayoutVersion = layoutVersion;
+  const previousPointCount = layoutPointNames.length;
+  const result = ingestFullPlcData(data);
+  const layoutChanged = previousLayoutVersion !== layoutVersion || previousPointCount !== layoutPointNames.length;
+  if (layoutChanged) {
+    // /api/tags includes dynamically created script metadata tags. When one
+    // browser tab uploads a script, other tabs discover the layout version
+    // change through /api/tag_data and refresh this registry as well.
+    ensureTagStoreLoaded({ force: true, preserveEdits: true }).catch(() => {});
+  }
+  return result;
+}
+
 async function refreshPlcData() {
   if (dataInflight) return dataInflight;
   dataInflight = (async () => {
     try {
-      const data = await getPlcData();
-      const map = {};
-      const names = [];
-      for (const p of data.points || []) {
-        map[p.name] = p;
-        names.push(p.name);
+      let data;
+      if (!fullPlcDataLoaded) {
+        data = await refreshFullPlcData();
+      } else {
+        const compact = await getTagData();
+        const compactLayout = Number(compact.layout_version ?? compact.layout ?? compact.l ?? 0);
+        const compactPointCount = Number(compact.point_count ?? compact.pc ?? 0);
+        const indexedValues = Array.isArray(compact.values) ? compact.values : (Array.isArray(compact.a) ? compact.a : null);
+        const indexed = !!(compact.indexed ?? compact.i);
+        const needsLayoutRefresh =
+          (compactLayout && layoutVersion && compactLayout !== layoutVersion) ||
+          (indexed && compactPointCount && compactPointCount !== layoutPointNames.length) ||
+          (indexed && indexedValues && indexedValues.length !== layoutPointNames.length);
+
+        if (needsLayoutRefresh) {
+          data = await refreshFullPlcData();
+          return data;
+        }
+
+        data = ingestCompactTagData(compact);
+        if (data.layout_mismatch) {
+          data = await refreshFullPlcData();
+        }
       }
-      plcData.value = data;
-      pointsByName.value = map;
-      tagNames.value = names.sort();
       plcDataOnline.value = true;
       dataLastUpdated.value = Date.now();
       return data;
     } catch (e) {
-      plcDataOnline.value = false;
-      throw e;
+      // Older firmware builds do not have /api/tag_data. Fall back to full plc_data.
+      try {
+        const data = await refreshFullPlcData();
+        plcDataOnline.value = true;
+        dataLastUpdated.value = Date.now();
+        return data;
+      } catch (_) {
+        plcDataOnline.value = false;
+        throw e;
+      }
     } finally {
       dataInflight = null;
     }
@@ -150,6 +287,6 @@ export function usePlcStore() {
     online, plcDataOnline, lastError, commandLastUpdated, dataLastUpdated,
     commandPollMs, dataPollMs,
     scriptState, plcRunning, flashWritesAllowed, plcMode, activeScriptName, activeScriptPath, pointCount,
-    start, usePlcData, refreshCommandCenter, refreshPlcData, setPlcRun, plcWrite,
+    start, usePlcData, refreshCommandCenter, refreshPlcData, refreshFullPlcData, setPlcRun, plcWrite,
   };
 }

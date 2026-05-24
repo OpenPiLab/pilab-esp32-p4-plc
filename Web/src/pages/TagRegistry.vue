@@ -253,7 +253,7 @@ export default {
     },
     isSystemTagName(name) {
       const n = String(name || '').trim();
-      return /^(I\d+|Q\d+|AI\d+|AO\d+)$/.test(n) || /^PLC_/.test(n);
+      return /^(I\d+|Q\d+|AI\d+|AO\d+)$/.test(n) || /^PLC_/.test(n) || /^__obj_/.test(n);
     },
     normalizeSystemTagRow(raw, source = 'registry') {
       const name = this.tagRegistryNormalizeName(raw && raw.name);
