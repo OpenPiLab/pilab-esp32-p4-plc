@@ -9,7 +9,7 @@ class asIScriptEngine;
 extern "C" {
 #endif
 
-#define PLC_TAG_MAX_COUNT 256
+#define PLC_TAG_MAX_COUNT 384
 #define PLC_TAG_NAME_MAX 32
 #define PLC_TAG_DESC_MAX 64
 
@@ -29,6 +29,22 @@ typedef struct PlcTagValueInfo {
         float f;
     } value;
 } PlcTagValueInfo;
+
+
+#ifndef PLC_UDP_TAG_GROUP_COUNT
+#define PLC_UDP_TAG_GROUP_COUNT 32
+#endif
+#ifndef PLC_UDP_TAG_VALUE_COUNT
+#define PLC_UDP_TAG_VALUE_COUNT 128
+#endif
+
+typedef struct PlcUdpTagWriteStats {
+    uint32_t write_count;
+    uint32_t last_write_us;
+    uint32_t max_write_us;
+    uint32_t last_values_written;
+    uint32_t cache_ready;
+} PlcUdpTagWriteStats;
 
 typedef struct PlcTagIndexedValueInfo {
     PlcTagType type;
@@ -85,6 +101,14 @@ bool plc_tags_load_json_ram(const char* json, char* err, size_t err_len);
 // Explicit persistent save of the current live user tag registry to LittleFS. Caller should enforce STOP/flash policy.
 bool plc_tags_save_to_flash(char* err, size_t err_len);
 bool plc_tags_write_value_json(const char* json, char* err, size_t err_len);
+
+// Firmware-owned UDP tag bank: UDP_DI0..31, UDP_DO0..31, UDP_AI0..31, UDP_AO0..31.
+// Values are written by cached tag indices, not name lookup, from the PLC scan path.
+void plc_tags_ensure_udp_tag_bank(void);
+uint32_t plc_tags_write_udp_cached_values(const uint32_t* raw_values, size_t value_count);
+void plc_tags_get_udp_tag_write_stats(PlcUdpTagWriteStats* out);
+void plc_tags_clear_udp_tag_write_stats(void);
+
 
 #ifdef __cplusplus
 }

@@ -46,14 +46,14 @@ static const char *TAG = "ETH_WEB";
 #define PLC_DATA_CHUNK_SIZE       512
 #define PLC_DATA_YIELD_EVERY      4
 #define PLC_DATA_SIM_COUNT        0
-#define PLC_DATA_JSON_CAP          (24 * 1024)
+#define PLC_DATA_JSON_CAP          (48 * 1024)
 
 // /api/plc_data cache settings.
 // The HTTP GET handler serves this prebuilt JSON buffer instead of rebuilding
 // process/tag JSON on every browser/HMI request. This keeps refresh storms from
 // repeatedly touching live PLC state, allocating heap, or formatting JSON.
 #define TAG_DATA_CACHE_PERIOD_MS     100
-#define TAG_DATA_JSON_CAP            (16 * 1024)
+#define TAG_DATA_JSON_CAP            (32 * 1024)
 #define PLC_DATA_CACHE_STACK_WORDS  8192
 #define PLC_DATA_CACHE_PRIORITY     1
 
@@ -1726,7 +1726,7 @@ static esp_err_t files_delete_post_handler(httpd_req_t *req)
 
 static esp_err_t api_tags_get_handler(httpd_req_t *req)
 {
-    const size_t json_cap = 32768;
+    const size_t json_cap = 65536;
     char *json = (char*)heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!json) json = (char*)heap_caps_malloc(json_cap, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!json) {

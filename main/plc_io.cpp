@@ -1,4 +1,5 @@
 #include "plc_io.hpp"
+#include "plc_tags.hpp"
 
 #include <stdio.h>
 #include <string.h>
@@ -7,6 +8,8 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
+#include "esp_timer.h"
+#include "esp_attr.h"
 
 static const char* TAG = "PLC_IO";
 
@@ -74,6 +77,34 @@ struct PlcIoImage {
 static PlcIoImage g_io = {};
 static portMUX_TYPE g_io_lock = portMUX_INITIALIZER_UNLOCKED;
 
+static constexpr uint32_t PLC_UDP_IO_STALE_US = 1000000u; // keep last remote image active for 1 s
+
+struct PlcUdpInputImage {
+    uint32_t seq;
+    uint32_t di_mask;
+    float ai[PLC_AI_COUNT];
+    uint64_t rx_time_us;
+};
+
+struct PlcUdpTagImage {
+    uint32_t seq;
+    uint64_t rx_time_us;
+    uint32_t values[PLC_UDP_TAG_VALUE_COUNT];
+};
+
+static DRAM_ATTR PlcUdpInputImage g_udp_img[2] = {};
+static DRAM_ATTR PlcUdpInputImage g_udp_active_img = {};
+static DRAM_ATTR PlcUdpTagImage g_udp_tag_img[2] = {};
+static DRAM_ATTR PlcUdpTagImage g_udp_tag_active_img = {};
+static DRAM_ATTR PlcUdpIoStats g_udp_stats = {};
+static uint32_t g_udp_publish_index = 0;
+static uint32_t g_udp_publish_generation = 0;
+static uint32_t g_udp_consumed_generation = 0;
+static uint32_t g_udp_tag_publish_index = 0;
+static uint32_t g_udp_tag_publish_generation = 0;
+static uint32_t g_udp_tag_consumed_generation = 0;
+static portMUX_TYPE g_udp_lock = portMUX_INITIALIZER_UNLOCKED;
+
 static inline bool valid_gpio(gpio_num_t pin)
 {
     return pin >= GPIO_NUM_0 && pin < GPIO_NUM_MAX;
@@ -91,6 +122,7 @@ static uint32_t make_mask_u8(const uint8_t* bits, uint32_t count)
 void plc_io_init(void)
 {
     memset(&g_io, 0, sizeof(g_io));
+    plc_io_clear_udp_io_stats();
 
     for (int i = 0; i < PLC_DI_COUNT; ++i) {
         if (!valid_gpio(k_di_pins[i])) continue;
@@ -126,6 +158,129 @@ void plc_io_init(void)
     }
 }
 
+static void plc_io_consume_udp_input_image_locked(uint64_t now_us)
+{
+    bool active = false;
+    PlcUdpInputImage active_img = {};
+
+    // Take one short UDP-buffer critical section: copy the latest complete image
+    // if the UDP task published a newer one, then update diagnostics. The normal
+    // PLC process-image lock is already held by the caller, so the copied image
+    // is mirrored into g_io after this section exits.
+    taskENTER_CRITICAL(&g_udp_lock);
+
+    const uint32_t pub_gen = g_udp_publish_generation;
+    const uint32_t pub_index = g_udp_publish_index;
+
+    if (pub_gen != g_udp_consumed_generation) {
+        g_udp_active_img = g_udp_img[pub_index & 1u];
+        if (pub_gen > g_udp_consumed_generation + 1u && g_udp_consumed_generation != 0) {
+            g_udp_stats.missed_update_count += pub_gen - g_udp_consumed_generation - 1u;
+        }
+        g_udp_consumed_generation = pub_gen;
+        g_udp_stats.consume_count++;
+        g_udp_stats.consumed_seq = g_udp_active_img.seq;
+        g_udp_stats.last_di_mask = g_udp_active_img.di_mask;
+    }
+
+    active_img = g_udp_active_img;
+
+    if (active_img.rx_time_us == 0) {
+        g_udp_stats.active = 0;
+    } else {
+        const uint64_t age64 = now_us >= active_img.rx_time_us ? now_us - active_img.rx_time_us : 0;
+        const uint32_t age_us = age64 > UINT32_MAX ? UINT32_MAX : (uint32_t)age64;
+        g_udp_stats.last_age_us = age_us;
+
+        if (age_us > PLC_UDP_IO_STALE_US) {
+            g_udp_stats.active = 0;
+            g_udp_stats.stale_count++;
+        } else {
+            g_udp_stats.active = 1;
+            g_udp_stats.last_di_mask = active_img.di_mask;
+            if (age_us > g_udp_stats.max_age_us) {
+                g_udp_stats.max_age_us = age_us;
+            }
+            for (int i = 0; i < PLC_AI_COUNT; ++i) {
+                g_udp_stats.last_ai[i] = active_img.ai[i];
+            }
+            active = true;
+        }
+    }
+
+    taskEXIT_CRITICAL(&g_udp_lock);
+
+    if (!active) {
+        return;
+    }
+
+    // Simulate a complete remote input process image. This deliberately mirrors
+    // the received UDP input image into the normal PLC process image, so ladder,
+    // AngelScript, and the HMI all see the same data path they would see from a
+    // real remote I/O coupler.
+    for (int i = 0; i < PLC_DI_COUNT; ++i) {
+        const uint8_t bit = (active_img.di_mask & (1u << i)) ? 1u : 0u;
+        g_io.raw_di[i] = bit;
+        g_io.candidate_di[i] = bit;
+        g_io.stable_count[i] = PLC_DEBOUNCE_TICKS;
+        g_io.debounced_di[i] = bit;
+    }
+    for (int i = 0; i < PLC_AI_COUNT; ++i) {
+        g_io.ai[i] = active_img.ai[i];
+    }
+}
+
+static void plc_io_consume_udp_tag_image_scan(uint64_t now_us)
+{
+    bool active_new_image = false;
+    PlcUdpTagImage active_img = {};
+
+    taskENTER_CRITICAL(&g_udp_lock);
+
+    const uint32_t pub_gen = g_udp_tag_publish_generation;
+    const uint32_t pub_index = g_udp_tag_publish_index;
+
+    if (pub_gen != g_udp_tag_consumed_generation) {
+        g_udp_tag_active_img = g_udp_tag_img[pub_index & 1u];
+        if (pub_gen > g_udp_tag_consumed_generation + 1u && g_udp_tag_consumed_generation != 0) {
+            g_udp_stats.tag_missed_update_count += pub_gen - g_udp_tag_consumed_generation - 1u;
+        }
+        g_udp_tag_consumed_generation = pub_gen;
+        g_udp_stats.tag_consume_count++;
+        g_udp_stats.tag_consumed_seq = g_udp_tag_active_img.seq;
+
+        active_img = g_udp_tag_active_img;
+        if (active_img.rx_time_us != 0) {
+            const uint64_t age64 = now_us >= active_img.rx_time_us ? now_us - active_img.rx_time_us : 0;
+            const uint32_t age_us = age64 > UINT32_MAX ? UINT32_MAX : (uint32_t)age64;
+            g_udp_stats.tag_last_age_us = age_us;
+            if (age_us <= PLC_UDP_IO_STALE_US) {
+                if (age_us > g_udp_stats.tag_max_age_us) g_udp_stats.tag_max_age_us = age_us;
+                active_new_image = true;
+            }
+        }
+    }
+
+    taskEXIT_CRITICAL(&g_udp_lock);
+
+    if (!active_new_image) return;
+
+    const uint64_t t0 = (uint64_t)esp_timer_get_time();
+    const uint32_t written = plc_tags_write_udp_cached_values(active_img.values, PLC_UDP_TAG_VALUE_COUNT);
+    const uint64_t t1 = (uint64_t)esp_timer_get_time();
+    const uint32_t write_us = (t1 >= t0) ? (uint32_t)(t1 - t0) : 0u;
+
+    PlcUdpTagWriteStats tag_stats = {};
+    plc_tags_get_udp_tag_write_stats(&tag_stats);
+
+    taskENTER_CRITICAL(&g_udp_lock);
+    g_udp_stats.tag_values_written = written;
+    g_udp_stats.tag_write_last_us = write_us;
+    if (write_us > g_udp_stats.tag_write_max_us) g_udp_stats.tag_write_max_us = write_us;
+    g_udp_stats.tag_cache_ready = tag_stats.cache_ready;
+    taskEXIT_CRITICAL(&g_udp_lock);
+}
+
 void plc_io_tick_1ms(void)
 {
     uint8_t raw[PLC_DI_COUNT];
@@ -137,6 +292,8 @@ void plc_io_tick_1ms(void)
         }
         raw[i] = PLC_INPUT_ACTIVE_LOW ? (level == 0) : (level != 0);
     }
+
+    const uint64_t now_us = (uint64_t)esp_timer_get_time();
 
     taskENTER_CRITICAL(&g_io_lock);
 
@@ -160,9 +317,19 @@ void plc_io_tick_1ms(void)
     g_io.ai[0] = (g_io.tick_count % 1000) * 0.001f;
     g_io.ai[1] = (float)make_mask_u8(g_io.debounced_di, PLC_DI_COUNT);
 
+    // If validated UDP remote-I/O packets are arriving, overwrite the physical
+    // test inputs with the latest complete UDP process image. This is the key
+    // simulation path for testing whether UDP I/O traffic affects PLC timing.
+    plc_io_consume_udp_input_image_locked(now_us);
+
     g_io.tick_count++;
 
     taskEXIT_CRITICAL(&g_io_lock);
+
+    // Scan-side cached-index tag write path for the 128 UDP_* runtime tags.
+    // This is intentionally outside g_io_lock so tag mutex contention shows up
+    // in udp_tag_write_last_us without extending the process-image critical section.
+    plc_io_consume_udp_tag_image_scan(now_us);
 }
 
 void plc_io_apply_outputs(void)
@@ -314,6 +481,71 @@ void plc_io_note_script_scan(void)
     taskEXIT_CRITICAL(&g_io_lock);
 }
 
+void plc_io_publish_udp_input_image(uint32_t seq, uint32_t di_mask, const float* ai, size_t ai_count, uint64_t rx_time_us)
+{
+    PlcUdpInputImage img = {};
+    img.seq = seq;
+    img.di_mask = di_mask;
+    img.rx_time_us = rx_time_us;
+    for (size_t i = 0; ai && i < ai_count && i < PLC_AI_COUNT; ++i) {
+        img.ai[i] = ai[i];
+    }
+
+    taskENTER_CRITICAL(&g_udp_lock);
+    uint32_t next_index = (g_udp_publish_index ^ 1u) & 1u;
+    g_udp_img[next_index] = img;
+    g_udp_publish_index = next_index;
+    g_udp_publish_generation++;
+    g_udp_stats.rx_publish_count++;
+    g_udp_stats.published_seq = seq;
+    taskEXIT_CRITICAL(&g_udp_lock);
+}
+
+void plc_io_publish_udp_tag_image(uint32_t seq, const uint32_t* values, size_t value_count, uint64_t rx_time_us)
+{
+    if (!values || value_count < PLC_UDP_TAG_VALUE_COUNT) return;
+
+    PlcUdpTagImage img = {};
+    img.seq = seq;
+    img.rx_time_us = rx_time_us;
+    memcpy(img.values, values, sizeof(img.values));
+
+    taskENTER_CRITICAL(&g_udp_lock);
+    uint32_t next_index = (g_udp_tag_publish_index ^ 1u) & 1u;
+    g_udp_tag_img[next_index] = img;
+    g_udp_tag_publish_index = next_index;
+    g_udp_tag_publish_generation++;
+    g_udp_stats.tag_publish_count++;
+    g_udp_stats.tag_published_seq = seq;
+    taskEXIT_CRITICAL(&g_udp_lock);
+}
+
+void plc_io_get_udp_io_stats(PlcUdpIoStats* stats)
+{
+    if (!stats) return;
+    taskENTER_CRITICAL(&g_udp_lock);
+    *stats = g_udp_stats;
+    taskEXIT_CRITICAL(&g_udp_lock);
+}
+
+void plc_io_clear_udp_io_stats(void)
+{
+    taskENTER_CRITICAL(&g_udp_lock);
+    memset(g_udp_img, 0, sizeof(g_udp_img));
+    memset(&g_udp_active_img, 0, sizeof(g_udp_active_img));
+    memset(g_udp_tag_img, 0, sizeof(g_udp_tag_img));
+    memset(&g_udp_tag_active_img, 0, sizeof(g_udp_tag_active_img));
+    memset(&g_udp_stats, 0, sizeof(g_udp_stats));
+    g_udp_publish_index = 0;
+    g_udp_publish_generation = 0;
+    g_udp_consumed_generation = 0;
+    g_udp_tag_publish_index = 0;
+    g_udp_tag_publish_generation = 0;
+    g_udp_tag_consumed_generation = 0;
+    taskEXIT_CRITICAL(&g_udp_lock);
+    plc_tags_clear_udp_tag_write_stats();
+}
+
 
 void plc_io_get_snapshot(PlcIoSnapshot* snapshot)
 {
@@ -348,6 +580,7 @@ void plc_io_get_status_json(char* out, size_t out_len)
     uint32_t script_scan_count;
     uint32_t output_write_count;
     float ai0, ai1, ao0, ao1;
+    PlcUdpIoStats udp_stats;
 
     taskENTER_CRITICAL(&g_io_lock);
     raw_mask = make_mask_u8(g_io.raw_di, PLC_DI_COUNT);
@@ -362,10 +595,19 @@ void plc_io_get_status_json(char* out, size_t out_len)
     ao1 = g_io.ao[1];
     taskEXIT_CRITICAL(&g_io_lock);
 
+    plc_io_get_udp_io_stats(&udp_stats);
+
     snprintf(out, out_len,
              "{\"di_count\":%u,\"do_count\":%u,\"raw_di_mask\":%lu,\"di_mask\":%lu,\"do_mask\":%lu,"
              "\"tick_count\":%lu,\"script_scan_count\":%lu,\"output_write_count\":%lu,"
-             "\"ai0\":%.3f,\"ai1\":%.3f,\"ao0\":%.3f,\"ao1\":%.3f}",
+             "\"ai0\":%.3f,\"ai1\":%.3f,\"ao0\":%.3f,\"ao1\":%.3f,"
+             "\"udp_io_active\":%lu,\"udp_io_rx_publish_count\":%lu,\"udp_io_consume_count\":%lu,"
+             "\"udp_io_missed_update_count\":%lu,\"udp_io_published_seq\":%lu,\"udp_io_consumed_seq\":%lu,"
+             "\"udp_io_last_di_mask\":%lu,\"udp_io_last_age_us\":%lu,\"udp_io_max_age_us\":%lu,"
+             "\"udp_tag_publish_count\":%lu,\"udp_tag_consume_count\":%lu,\"udp_tag_missed_update_count\":%lu,"
+             "\"udp_tag_published_seq\":%lu,\"udp_tag_consumed_seq\":%lu,"
+             "\"udp_tag_values_written\":%lu,\"udp_tag_write_last_us\":%lu,\"udp_tag_write_max_us\":%lu,"
+             "\"udp_tag_cache_ready\":%lu,\"udp_tag_last_age_us\":%lu,\"udp_tag_max_age_us\":%lu}",
              (unsigned)PLC_DI_COUNT,
              (unsigned)PLC_DO_COUNT,
              (unsigned long)raw_mask,
@@ -377,5 +619,25 @@ void plc_io_get_status_json(char* out, size_t out_len)
              (double)ai0,
              (double)ai1,
              (double)ao0,
-             (double)ao1);
+             (double)ao1,
+             (unsigned long)udp_stats.active,
+             (unsigned long)udp_stats.rx_publish_count,
+             (unsigned long)udp_stats.consume_count,
+             (unsigned long)udp_stats.missed_update_count,
+             (unsigned long)udp_stats.published_seq,
+             (unsigned long)udp_stats.consumed_seq,
+             (unsigned long)udp_stats.last_di_mask,
+             (unsigned long)udp_stats.last_age_us,
+             (unsigned long)udp_stats.max_age_us,
+             (unsigned long)udp_stats.tag_publish_count,
+             (unsigned long)udp_stats.tag_consume_count,
+             (unsigned long)udp_stats.tag_missed_update_count,
+             (unsigned long)udp_stats.tag_published_seq,
+             (unsigned long)udp_stats.tag_consumed_seq,
+             (unsigned long)udp_stats.tag_values_written,
+             (unsigned long)udp_stats.tag_write_last_us,
+             (unsigned long)udp_stats.tag_write_max_us,
+             (unsigned long)udp_stats.tag_cache_ready,
+             (unsigned long)udp_stats.tag_last_age_us,
+             (unsigned long)udp_stats.tag_max_age_us);
 }

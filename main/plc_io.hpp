@@ -16,6 +16,12 @@ extern "C" {
 #define PLC_DO_COUNT 8
 #define PLC_AI_COUNT 4
 #define PLC_AO_COUNT 4
+#ifndef PLC_UDP_TAG_GROUP_COUNT
+#define PLC_UDP_TAG_GROUP_COUNT 32
+#endif
+#ifndef PLC_UDP_TAG_VALUE_COUNT
+#define PLC_UDP_TAG_VALUE_COUNT 128
+#endif
 
 // 1 ms hardware tick input/update path.
 void plc_io_init(void);
@@ -56,6 +62,39 @@ uint32_t plc_io_get_script_scan_count(void);
 uint32_t plc_io_get_output_write_count(void);
 void plc_io_note_script_scan(void);
 void plc_io_get_status_json(char* out, size_t out_len);
+
+// UDP remote-I/O simulation diagnostics. The UDP task publishes validated
+// packets into a double buffer. The 1 ms PLC I/O tick consumes the latest
+// complete image and mirrors it into the normal process image.
+typedef struct PlcUdpIoStats {
+    uint32_t rx_publish_count;
+    uint32_t consume_count;
+    uint32_t missed_update_count;
+    uint32_t active;
+    uint32_t published_seq;
+    uint32_t consumed_seq;
+    uint32_t last_di_mask;
+    uint32_t last_age_us;
+    uint32_t max_age_us;
+    uint32_t stale_count;
+    uint32_t tag_publish_count;
+    uint32_t tag_consume_count;
+    uint32_t tag_missed_update_count;
+    uint32_t tag_published_seq;
+    uint32_t tag_consumed_seq;
+    uint32_t tag_values_written;
+    uint32_t tag_write_last_us;
+    uint32_t tag_write_max_us;
+    uint32_t tag_cache_ready;
+    uint32_t tag_last_age_us;
+    uint32_t tag_max_age_us;
+    float    last_ai[PLC_AI_COUNT];
+} PlcUdpIoStats;
+
+void plc_io_publish_udp_input_image(uint32_t seq, uint32_t di_mask, const float* ai, size_t ai_count, uint64_t rx_time_us);
+void plc_io_publish_udp_tag_image(uint32_t seq, const uint32_t* values, size_t value_count, uint64_t rx_time_us);
+void plc_io_get_udp_io_stats(PlcUdpIoStats* stats);
+void plc_io_clear_udp_io_stats(void);
 
 #ifdef __cplusplus
 }

@@ -67,6 +67,10 @@ static size_t g_tag_count = 0;
 static SemaphoreHandle_t g_tags_mutex = nullptr;
 static bool g_loaded = false;
 
+static int16_t g_udp_tag_indices[PLC_UDP_TAG_VALUE_COUNT];
+static bool g_udp_tag_cache_ready = false;
+static PlcUdpTagWriteStats g_udp_tag_write_stats = {};
+
 static void set_err(char* err, size_t err_len, const char* msg)
 {
     if (err && err_len) snprintf(err, err_len, "%s", msg ? msg : "");
@@ -152,9 +156,24 @@ static bool is_pilab_monitor_tag_name(const char* name)
     return name && strncmp(name, "__obj_", 6) == 0;
 }
 
+static bool is_udp_runtime_tag_name(const char* name)
+{
+    if (!name) return false;
+    const char* prefixes[] = { "UDP_DI", "UDP_DO", "UDP_AI", "UDP_AO" };
+    for (size_t p = 0; p < 4; ++p) {
+        const size_t plen = strlen(prefixes[p]);
+        if (strncmp(name, prefixes[p], plen) != 0) continue;
+        const char* n = name + plen;
+        if (!all_digits(n)) continue;
+        long idx = strtol(n, nullptr, 10);
+        return idx >= 0 && idx < PLC_UDP_TAG_GROUP_COUNT;
+    }
+    return false;
+}
+
 static bool is_system_tag_name(const char* name)
 {
-    return is_exact_runtime_io_name(name) || is_plc_runtime_system_tag_name(name) || is_pilab_monitor_tag_name(name);
+    return is_exact_runtime_io_name(name) || is_plc_runtime_system_tag_name(name) || is_pilab_monitor_tag_name(name) || is_udp_runtime_tag_name(name);
 }
 
 static bool is_direct_script_runtime_global(const char* name)
@@ -386,6 +405,86 @@ static void ensure_compatibility_tags_nolock()
     add_bool_tag_nolock("Start", false, "HMI start command bit");
 }
 
+static void add_udp_tag_nolock(const char* name, PlcTagType type, const char* desc, const char* units)
+{
+    int idx = find_tag_index_nolock(name);
+    if (idx < 0) {
+        if (g_tag_count >= PLC_TAG_MAX_COUNT) return;
+        RuntimeTag& t = g_tags[g_tag_count++];
+        memset(&t, 0, sizeof(t));
+        snprintf(t.name, sizeof(t.name), "%.*s", (int)(PLC_TAG_NAME_MAX - 1), name);
+        t.type = type;
+        if (type == PLC_TAG_BOOL) t.value.b = false;
+        else if (type == PLC_TAG_INT) t.value.i = 0;
+        else t.value.f = 0.0f;
+        tag_copy_current_to_initial(t);
+        idx = (int)g_tag_count - 1;
+    }
+
+    RuntimeTag& t = g_tags[idx];
+    t.writable = false;
+    t.retentive = false;
+    t.hmi_visible = true;
+    t.script_visible = true;
+    t.min_value = (type == PLC_TAG_BOOL) ? 0.0f : -1000000000.0f;
+    t.max_value = (type == PLC_TAG_BOOL) ? 1.0f : 1000000000.0f;
+    snprintf(t.units, sizeof(t.units), "%.*s", (int)(sizeof(t.units) - 1), units ? units : "");
+    snprintf(t.description, sizeof(t.description), "%.*s", (int)(PLC_TAG_DESC_MAX - 1), desc ? desc : "UDP runtime tag");
+}
+
+static void ensure_udp_tag_bank_nolock()
+{
+    char name[PLC_TAG_NAME_MAX];
+    char desc[PLC_TAG_DESC_MAX];
+
+    for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+        snprintf(name, sizeof(name), "UDP_DI%d", i);
+        snprintf(desc, sizeof(desc), "UDP remote digital input %d", i);
+        add_udp_tag_nolock(name, PLC_TAG_BOOL, desc, "");
+    }
+    for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+        snprintf(name, sizeof(name), "UDP_DO%d", i);
+        snprintf(desc, sizeof(desc), "UDP remote digital output/status %d", i);
+        add_udp_tag_nolock(name, PLC_TAG_BOOL, desc, "");
+    }
+    for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+        snprintf(name, sizeof(name), "UDP_AI%d", i);
+        snprintf(desc, sizeof(desc), "UDP remote analog input %d", i);
+        add_udp_tag_nolock(name, PLC_TAG_FLOAT, desc, "");
+    }
+    for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+        snprintf(name, sizeof(name), "UDP_AO%d", i);
+        snprintf(desc, sizeof(desc), "UDP remote analog output/status %d", i);
+        add_udp_tag_nolock(name, PLC_TAG_FLOAT, desc, "");
+    }
+
+    for (int i = 0; i < PLC_UDP_TAG_VALUE_COUNT; ++i) g_udp_tag_indices[i] = -1;
+
+    bool ok = true;
+    for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+        snprintf(name, sizeof(name), "UDP_DI%d", i);
+        g_udp_tag_indices[i] = (int16_t)find_tag_index_nolock(name);
+        ok = ok && g_udp_tag_indices[i] >= 0;
+    }
+    for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+        snprintf(name, sizeof(name), "UDP_DO%d", i);
+        g_udp_tag_indices[PLC_UDP_TAG_GROUP_COUNT + i] = (int16_t)find_tag_index_nolock(name);
+        ok = ok && g_udp_tag_indices[PLC_UDP_TAG_GROUP_COUNT + i] >= 0;
+    }
+    for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+        snprintf(name, sizeof(name), "UDP_AI%d", i);
+        g_udp_tag_indices[PLC_UDP_TAG_GROUP_COUNT * 2 + i] = (int16_t)find_tag_index_nolock(name);
+        ok = ok && g_udp_tag_indices[PLC_UDP_TAG_GROUP_COUNT * 2 + i] >= 0;
+    }
+    for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+        snprintf(name, sizeof(name), "UDP_AO%d", i);
+        g_udp_tag_indices[PLC_UDP_TAG_GROUP_COUNT * 3 + i] = (int16_t)find_tag_index_nolock(name);
+        ok = ok && g_udp_tag_indices[PLC_UDP_TAG_GROUP_COUNT * 3 + i] >= 0;
+    }
+    g_udp_tag_cache_ready = ok;
+    g_udp_tag_write_stats.cache_ready = ok ? 1u : 0u;
+}
+
 static void add_default_tags_nolock()
 {
     g_tag_count = 0;
@@ -571,7 +670,7 @@ static bool write_runtime_tag_object_json(char*& p, size_t& rem, const RuntimeTa
 
 static bool save_to_tags_file_nolock()
 {
-    const size_t json_cap = 32768;
+    const size_t json_cap = 65536;
     char* json = (char*)malloc(json_cap);
     if (!json) return false;
 
@@ -864,6 +963,7 @@ static bool plc_tags_load_json_internal(const char* json, bool save_file, char* 
     // so any existing AngelScript RegisterGlobalProperty() pointers stay valid.
     ensure_runtime_diagnostic_tags_nolock();
     ensure_compatibility_tags_nolock();
+    ensure_udp_tag_bank_nolock();
     bool saved = save_file ? save_to_tags_file_nolock() : true;
     xSemaphoreGive(g_tags_mutex);
 
@@ -917,6 +1017,7 @@ void plc_tags_init(void)
         }
         ensure_runtime_diagnostic_tags_nolock();
         ensure_compatibility_tags_nolock();
+        ensure_udp_tag_bank_nolock();
         g_loaded = true;
         ESP_LOGI(TAG, "Tag registry initialized: %u tags", (unsigned)g_tag_count);
     }
@@ -1115,7 +1216,10 @@ bool plc_tags_register_angelscript_globals(asIScriptEngine* engine, char* err, s
         char name[PLC_TAG_NAME_MAX];
         PlcTagType type;
         void* ptr;
-    } regs[PLC_TAG_MAX_COUNT];
+    };
+
+    GlobalReg* regs = (GlobalReg*)calloc(PLC_TAG_MAX_COUNT, sizeof(GlobalReg));
+    if (!regs) { set_err(err, err_len, "Out of memory allocating AngelScript tag registration list"); return false; }
 
     size_t reg_count = 0;
     xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
@@ -1147,15 +1251,79 @@ bool plc_tags_register_angelscript_globals(asIScriptEngine* engine, char* err, s
         int r = engine->RegisterGlobalProperty(decl, regs[i].ptr);
         if (r < 0) {
             snprintf(err, err_len, "RegisterGlobalProperty failed for user tag: %s", decl);
+            free(regs);
             return false;
         }
     }
 
+    free(regs);
     set_err(err, err_len, "OK");
     return true;
 }
 
 
+
+void plc_tags_ensure_udp_tag_bank(void)
+{
+    if (!g_tags_mutex) plc_tags_init();
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    ensure_udp_tag_bank_nolock();
+    xSemaphoreGive(g_tags_mutex);
+}
+
+uint32_t plc_tags_write_udp_cached_values(const uint32_t* raw_values, size_t value_count)
+{
+    if (!raw_values || value_count < PLC_UDP_TAG_VALUE_COUNT) return 0;
+    if (!g_tags_mutex) plc_tags_init();
+
+    uint32_t written = 0;
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    if (!g_udp_tag_cache_ready) ensure_udp_tag_bank_nolock();
+    if (g_udp_tag_cache_ready) {
+        for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+            RuntimeTag& t = g_tags[g_udp_tag_indices[i]];
+            if (t.type == PLC_TAG_BOOL) { t.value.b = raw_values[i] != 0u; written++; }
+        }
+        for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+            const int src = PLC_UDP_TAG_GROUP_COUNT + i;
+            RuntimeTag& t = g_tags[g_udp_tag_indices[src]];
+            if (t.type == PLC_TAG_BOOL) { t.value.b = raw_values[src] != 0u; written++; }
+        }
+        for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+            const int src = PLC_UDP_TAG_GROUP_COUNT * 2 + i;
+            RuntimeTag& t = g_tags[g_udp_tag_indices[src]];
+            if (t.type == PLC_TAG_FLOAT) { float f; memcpy(&f, &raw_values[src], sizeof(f)); t.value.f = f; written++; }
+        }
+        for (int i = 0; i < PLC_UDP_TAG_GROUP_COUNT; ++i) {
+            const int src = PLC_UDP_TAG_GROUP_COUNT * 3 + i;
+            RuntimeTag& t = g_tags[g_udp_tag_indices[src]];
+            if (t.type == PLC_TAG_FLOAT) { float f; memcpy(&f, &raw_values[src], sizeof(f)); t.value.f = f; written++; }
+        }
+    }
+    g_udp_tag_write_stats.write_count++;
+    g_udp_tag_write_stats.last_values_written = written;
+    g_udp_tag_write_stats.cache_ready = g_udp_tag_cache_ready ? 1u : 0u;
+    xSemaphoreGive(g_tags_mutex);
+    return written;
+}
+
+void plc_tags_get_udp_tag_write_stats(PlcUdpTagWriteStats* out)
+{
+    if (!out) return;
+    if (!g_tags_mutex) plc_tags_init();
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    *out = g_udp_tag_write_stats;
+    xSemaphoreGive(g_tags_mutex);
+}
+
+void plc_tags_clear_udp_tag_write_stats(void)
+{
+    if (!g_tags_mutex) plc_tags_init();
+    xSemaphoreTake(g_tags_mutex, portMAX_DELAY);
+    memset(&g_udp_tag_write_stats, 0, sizeof(g_udp_tag_write_stats));
+    g_udp_tag_write_stats.cache_ready = g_udp_tag_cache_ready ? 1u : 0u;
+    xSemaphoreGive(g_tags_mutex);
+}
 
 static bool pilab_param_type_from_name(const char* type_name, PlcTagType* out)
 {
